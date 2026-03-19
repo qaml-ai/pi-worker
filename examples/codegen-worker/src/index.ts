@@ -20,8 +20,8 @@ import { zipSync, strToU8 } from "fflate";
 // Dynamic import — avoid loading the 9MB TS compiler at Worker startup
 // This way the queue consumer doesn't OOM before processing messages
 const loadTypeChecker = () => import("./typecheck-mem.js").then((m) => m.typeCheckFromMap);
-import { scaffoldProject, type ScaffoldOptions } from "./scaffold.js";
 import { createShadcnTool } from "./shadcn-tool.js";
+import { runDesignAgent } from "./design-agent.js";
 
 interface Env {
 	OPENROUTER_API_KEY: string;
@@ -89,14 +89,7 @@ function zipFiles(files: Map<string, string>, prefix: string): Uint8Array {
 	return zipSync(entries, { level: 6 });
 }
 
-async function runAgent(prompt: string, projectId: string, apiKey: string, modelId?: string, scaffoldOpts?: ScaffoldOptions) {
-	const files = new Map<string, string>();
-	const prefix = `${projectId}/`;
-
-	// Scaffold the project before the agent starts — agent gets a pre-configured
-	// React Router 7 + shadcn/ui + Tailwind v4 project to customize
-	await scaffoldProject(files, prefix, projectName(projectId), scaffoldOpts);
-
+function createCodegenAgent(files: Map<string, string>, prefix: string, apiKey: string, modelId?: string) {
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: SYSTEM_PROMPT,
@@ -107,7 +100,7 @@ async function runAgent(prompt: string, projectId: string, apiKey: string, model
 		getApiKey: async () => apiKey,
 	});
 
-	return { agent, files, prefix };
+	return agent;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,13 +123,23 @@ export default {
 			return Response.json(JSON.parse(raw));
 		}
 
-		// POST /debug — synchronous with transcript
+		// POST /debug — synchronous with transcript (both agents)
 		if (request.method === "POST" && url.pathname === "/debug") {
 			const body = (await request.json()) as { prompt?: string; model?: string };
 			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
 			const projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-			const { agent, files, prefix } = await runAgent(body.prompt, projectId, env.OPENROUTER_API_KEY, body.model);
+			const prefix = `${projectId}/`;
+			const files = new Map<string, string>();
+
+			// Phase 1: Design agent picks style/theme/font and scaffolds
+			const designResult = await runDesignAgent(
+				body.prompt, files, prefix, projectName(projectId),
+				env.OPENROUTER_API_KEY, body.model,
+			);
+
+			// Phase 2: Codegen agent customizes the scaffolded project
+			const agent = createCodegenAgent(files, prefix, env.OPENROUTER_API_KEY, body.model);
 
 			const transcript: any[] = [];
 			agent.subscribe((e) => {
@@ -156,6 +159,7 @@ export default {
 
 			return Response.json({
 				projectId,
+				design: designResult.options,
 				transcript,
 				typeCheck: { success: tc.success, errors: tc.diagnostics.filter((d: any) => d.severity === "error").length },
 				fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length,
@@ -202,7 +206,14 @@ export default {
 				await updateStatus({ status: "running" });
 
 				const projectId = jobId.replace("job_", "proj_");
-				const { agent, files, prefix } = await runAgent(prompt, projectId, env.OPENROUTER_API_KEY);
+				const prefix = `${projectId}/`;
+				const files = new Map<string, string>();
+
+				// Phase 1: Design agent
+				await runDesignAgent(prompt, files, prefix, projectName(projectId), env.OPENROUTER_API_KEY);
+
+				// Phase 2: Codegen agent
+				const agent = createCodegenAgent(files, prefix, env.OPENROUTER_API_KEY);
 
 				const toolCalls: string[] = [];
 				agent.subscribe((e) => {
