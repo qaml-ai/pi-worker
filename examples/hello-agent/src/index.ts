@@ -1,10 +1,15 @@
 /**
- * Minimal micro agent example.
- *
- * POST { prompt } → agent reads/writes files in R2 → returns response.
+ * Minimal micro agent — just R2 file tools + pi-mono Agent.
  */
 
-import { createMicroAgent } from "pi-worker";
+import {
+	Agent,
+	getModel,
+	createR2ReadTool,
+	createR2WriteTool,
+	createR2EditTool,
+	createR2LsTool,
+} from "pi-worker";
 
 interface Env {
 	ANTHROPIC_API_KEY: string;
@@ -17,17 +22,30 @@ export default {
 			return Response.json({ usage: "POST { prompt: string }" });
 		}
 
-		const { prompt: userPrompt } = (await request.json()) as { prompt?: string };
-		if (!userPrompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
+		const { prompt } = (await request.json()) as { prompt?: string };
+		if (!prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
-		const { prompt, getResponse } = createMicroAgent({
-			bucket: env.FILES,
-			apiKey: env.ANTHROPIC_API_KEY,
-			systemPrompt: "You are a helpful coding assistant. Use the file tools to read, write, edit, and list files.",
+		const agent = new Agent({
+			initialState: {
+				systemPrompt: "You are a helpful coding assistant. Use the file tools to manage files in storage.",
+				model: getModel("anthropic", "claude-sonnet-4-20250514"),
+				thinkingLevel: "off",
+				tools: [
+					createR2ReadTool(env.FILES),
+					createR2WriteTool(env.FILES),
+					createR2EditTool(env.FILES),
+					createR2LsTool(env.FILES),
+				],
+			},
+			getApiKey: async () => env.ANTHROPIC_API_KEY,
 		});
 
-		await prompt(userPrompt);
+		await agent.prompt(prompt);
 
-		return Response.json({ response: getResponse() });
+		const msgs = agent.state.messages.filter((m) => m.role === "assistant");
+		const last = msgs[msgs.length - 1];
+		const response = last?.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
+
+		return Response.json({ response });
 	},
 };
