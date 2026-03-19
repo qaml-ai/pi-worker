@@ -13,6 +13,7 @@ import {
 	createR2EditTool,
 	createR2LsTool,
 	createExecuteTool,
+	createDownloadHandler,
 } from "pi-worker";
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 
@@ -20,6 +21,7 @@ export { Sandbox } from "@cloudflare/sandbox";
 
 interface Env {
 	OPENROUTER_API_KEY: string;
+	DOWNLOAD_SECRET: string;
 	SANDBOX: DurableObjectNamespace<Sandbox>;
 	LOADER: any;
 	FILES: R2Bucket;
@@ -69,6 +71,12 @@ You can write scripts to R2, iterate with edit, then run them with execute({ fil
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
+		const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
+
+		// Serve signed download links
+		const served = await downloads.serve(request);
+		if (served) return served;
+
 		if (request.method !== "POST") {
 			return Response.json({
 				usage: "POST multipart/form-data with 'prompt' and optional file(s)",
@@ -127,7 +135,7 @@ export default {
 
 			await agent.prompt(userPrompt);
 
-			// Collect outputs
+			// Collect outputs → store in R2 → return signed URLs
 			const lsResult = await sandbox.exec("ls /workspace/output/ 2>/dev/null");
 			const outputNames = lsResult.stdout.trim().split("\n").filter(Boolean);
 			const response = lastText(agent);
@@ -136,29 +144,26 @@ export default {
 				return Response.json({ response, toolCalls, error: agent.state.error });
 			}
 
-			if (outputNames.length === 1) {
-				const f = await sandbox.readFile(`/workspace/output/${outputNames[0]}`, { encoding: "base64" });
-				const bin = Uint8Array.from(atob(f.content), (c) => c.charCodeAt(0));
-				const ext = outputNames[0].split(".").pop() || "bin";
-				const mime: Record<string, string> = {
-					mp4: "video/mp4", webm: "video/webm", gif: "image/gif",
-					png: "image/png", jpg: "image/jpeg", mp3: "audio/mpeg",
-					wav: "audio/wav", ogg: "audio/ogg", aac: "audio/aac",
-				};
-				return new Response(bin, {
-					headers: {
-						"content-type": mime[ext] || "application/octet-stream",
-						"content-disposition": `attachment; filename="${outputNames[0]}"`,
-					},
-				});
-			}
+			const mimeTypes: Record<string, string> = {
+				mp4: "video/mp4", webm: "video/webm", gif: "image/gif",
+				png: "image/png", jpg: "image/jpeg", mp3: "audio/mpeg",
+				wav: "audio/wav", ogg: "audio/ogg", aac: "audio/aac",
+			};
 
-			const outputs: Record<string, string> = {};
+			const outputUrls: Record<string, string> = {};
 			for (const name of outputNames) {
 				const f = await sandbox.readFile(`/workspace/output/${name}`, { encoding: "base64" });
-				outputs[name] = f.content;
+				const bin = Uint8Array.from(atob(f.content), (c) => c.charCodeAt(0));
+				const ext = name.split(".").pop() || "bin";
+				const key = `${sessionId}/${name}`;
+				const path = await downloads.store(key, bin, {
+					contentType: mimeTypes[ext] || "application/octet-stream",
+					filename: name,
+				});
+				outputUrls[name] = new URL(path, request.url).href;
 			}
-			return Response.json({ files: outputs, response, toolCalls });
+
+			return Response.json({ outputs: outputUrls, response, toolCalls });
 		} catch (error: any) {
 			return Response.json({ error: error.message }, { status: 500 });
 		}

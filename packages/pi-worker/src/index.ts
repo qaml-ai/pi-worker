@@ -13,6 +13,9 @@ export { createR2ReadTool, createR2WriteTool, createR2EditTool, createR2LsTool }
 // Code execution tool
 export { createExecuteTool, type ExecuteToolHelpers } from "./execute-tool.js";
 
+// Signed download URLs
+export { createDownloadHandler, type DownloadHandler, type StoreOptions } from "./downloads.js";
+
 // Re-exports from pi-mono for convenience
 export { Agent } from "@mariozechner/pi-agent-core";
 export { getModel } from "@mariozechner/pi-ai";
