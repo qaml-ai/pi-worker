@@ -35,6 +35,9 @@ export {
 // Code execution tool
 export { createExecuteTool, type ExecuteToolHelpers, type ExecuteToolOptions } from "./execute-tool.js";
 
+// shadcn/ui component installer
+export { createShadcnTool, type ShadcnToolOptions } from "./shadcn-tool.js";
+
 // Signed download URLs
 export { createDownloadHandler, type DownloadHandler, type StoreOptions } from "./downloads.js";
 
