@@ -1,5 +1,8 @@
 {
   "name": "pi-worker-agents",
   "private": true,
-  "workspaces": ["packages/*", "examples/*"]
+  "workspaces": ["packages/*", "examples/*"],
+  "scripts": {
+    "postinstall": "sh scripts/patch-ajv.sh"
+  }
 }
