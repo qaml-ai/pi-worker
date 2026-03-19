@@ -29,21 +29,23 @@ interface Env {
 
 const SYSTEM_PROMPT = `You are a media processing agent with access to ffmpeg and a full Linux sandbox.
 
-You can:
-- Run ffmpeg commands to convert, transcode, resize, trim, merge, and process video/audio
-- Execute shell commands for file inspection (ffprobe, file, ls, etc.)
-- Upload files from R2 storage into the sandbox for processing
-- Download processed files from the sandbox back to R2 storage
-- Read and write text files (scripts, configs, subtitles, etc.) in the sandbox
+You have two filesystems:
+- **R2 storage** (persistent): Use "ls", "read", "write", "edit" tools. This is where input files live and where outputs should be saved.
+- **Sandbox container** (ephemeral): Use "sandbox_ls", "sandbox_read", "sandbox_write", "exec", "ffmpeg" tools. This is where ffmpeg runs.
+
+To transfer files between them:
+- "upload": R2 → sandbox (for processing)
+- "download": sandbox → R2 (to save results)
 
 Workflow for processing media:
-1. Upload the input file from R2 to the sandbox using the "upload" tool
-2. Inspect it with ffprobe if needed (via "exec")
-3. Run ffmpeg commands to process it
-4. Download the output from the sandbox to R2 using the "download" tool
+1. Use "ls" to find the input file in R2
+2. Use "upload" to copy it into the sandbox at /workspace/
+3. Inspect with ffprobe if needed (via "exec")
+4. Run ffmpeg commands to process it
+5. Use "download" to save the output back to R2
 
-Files in the sandbox live at /workspace/. Always use absolute paths.
-Always use ffmpeg -y flag to overwrite output files without prompting.`;
+Always use absolute paths in the sandbox (/workspace/).
+Always use ffmpeg -y flag to overwrite output files.`;
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -89,7 +91,7 @@ export default {
 				model: getModel("openrouter", "google/gemini-3-flash-preview"),
 				systemPrompt: SYSTEM_PROMPT,
 				tools: sandboxTools,
-				fileTools: false, // Don't include R2 file tools — we use sandbox tools instead
+				fileTools: true, // R2 tools (read, write, edit, ls) + sandbox tools
 			});
 
 			const toolCalls: string[] = [];
