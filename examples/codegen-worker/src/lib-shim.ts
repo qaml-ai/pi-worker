@@ -176,4 +176,57 @@ interface R2Bucket { get(key: string): Promise<R2ObjectBody | null>; put(key: st
 interface R2Object { key: string; size: number; etag: string; httpMetadata?: any; customMetadata?: Record<string, string>; }
 interface R2ObjectBody extends R2Object { body: ReadableStream; text(): Promise<string>; json<T>(): Promise<T>; arrayBuffer(): Promise<ArrayBuffer>; }
 interface R2Objects { objects: R2Object[]; truncated: boolean; cursor?: string; delimitedPrefixes: string[]; }
+
+// JSX support — minimal declarations so TSX compiles without needing
+// react/jsx-runtime module resolution to work perfectly
+declare namespace React {
+  type ReactNode = any;
+  type FC<P = {}> = (props: P) => ReactNode;
+  function useState<T>(init: T | (() => T)): [T, (v: T | ((prev: T) => T)) => void];
+  function useEffect(effect: () => void | (() => void), deps?: any[]): void;
+  function useCallback<T extends (...args: any[]) => any>(fn: T, deps: any[]): T;
+  function useMemo<T>(factory: () => T, deps: any[]): T;
+  function useRef<T>(init: T): { current: T };
+  function useContext<T>(context: any): T;
+  function createContext<T>(defaultValue: T): any;
+  function forwardRef<T, P = {}>(render: (props: P, ref: any) => ReactNode): any;
+  namespace JSX {
+    type Element = any;
+    type ElementType = any;
+    interface ElementClass { render: any; }
+    interface ElementAttributesProperty { props: {}; }
+    interface ElementChildrenAttribute { children: {}; }
+    interface IntrinsicAttributes { key?: any; }
+    interface IntrinsicClassAttributes<T> { ref?: any; }
+    interface IntrinsicElements { [tag: string]: any; }
+    type LibraryManagedAttributes<C, P> = P;
+  }
+}
+declare namespace JSX {
+  type Element = React.JSX.Element;
+  type ElementType = React.JSX.ElementType;
+  interface IntrinsicElements extends React.JSX.IntrinsicElements {}
+  interface ElementChildrenAttribute extends React.JSX.ElementChildrenAttribute {}
+}
+declare module "react" {
+  export = React;
+  export as namespace React;
+}
+declare module "react/jsx-runtime" {
+  export namespace JSX {
+    type Element = React.JSX.Element;
+    interface IntrinsicElements extends React.JSX.IntrinsicElements {}
+  }
+  export function jsx(type: any, props: any, key?: any): any;
+  export function jsxs(type: any, props: any, key?: any): any;
+  export const Fragment: any;
+}
+declare module "react/jsx-dev-runtime" {
+  export namespace JSX {
+    type Element = React.JSX.Element;
+    interface IntrinsicElements extends React.JSX.IntrinsicElements {}
+  }
+  export function jsxDEV(type: any, props: any, key?: any): any;
+  export const Fragment: any;
+}
 `;

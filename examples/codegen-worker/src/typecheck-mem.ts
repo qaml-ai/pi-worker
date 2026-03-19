@@ -42,9 +42,8 @@ export async function typeCheckFromMap(
 		typesFailed = r.failed;
 	}
 
-	// Debug: check what's in files after fetch
-	const nmCount = [...files.keys()].filter((k) => k.startsWith("node_modules/")).length;
-	if (nmCount > 0) console.log(`[typecheck-mem] ${nmCount} node_modules files after fetch`);
+	const nmFiles = [...files.keys()].filter((k) => k.startsWith("node_modules/"));
+	for (const f of nmFiles) console.log(`[nm] ${f}`);
 
 	const result = typeCheck(files);
 
