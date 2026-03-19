@@ -1,10 +1,13 @@
 /**
  * Fetch type declarations for npm packages.
  *
- * Scans source files for actual import paths, then fetches exactly those
- * types from unpkg. Handles both root imports ("hono") and subpath
- * imports ("hono/cors") via the package's exports map.
+ * Uses the TypeScript compiler's AST to extract import specifiers from
+ * source files, then fetches exactly those types from unpkg. Handles
+ * both root imports ("hono") and subpath imports ("hono/cors") via the
+ * package's exports map.
  */
+
+import ts from "typescript";
 
 const UNPKG = "https://unpkg.com";
 const FETCH_TIMEOUT_MS = 5000;
@@ -31,15 +34,32 @@ export async function fetchDependencyTypes(
 		return { fetched: [], failed: [] };
 	}
 
-	// Scan all .ts files for import specifiers
+	// Use the TS compiler AST to extract all external import specifiers
 	const importPaths = new Set<string>();
 	for (const [key, content] of files) {
 		if (!key.endsWith(".ts") && !key.endsWith(".tsx")) continue;
-		// Match: import ... from "pkg" or import ... from "pkg/subpath"
-		const matches = content.matchAll(/(?:import|export)\s+.*?from\s+["']([^"'./][^"']*)["']/g);
-		for (const m of matches) {
-			importPaths.add(m[1]);
-		}
+		const sourceFile = ts.createSourceFile(key, content, ts.ScriptTarget.Latest, false);
+		ts.forEachChild(sourceFile, function visit(node) {
+			// import ... from "specifier"
+			if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+				const spec = node.moduleSpecifier.text;
+				if (!spec.startsWith(".") && !spec.startsWith("/")) importPaths.add(spec);
+			}
+			// export ... from "specifier"
+			if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+				const spec = node.moduleSpecifier.text;
+				if (!spec.startsWith(".") && !spec.startsWith("/")) importPaths.add(spec);
+			}
+			// import("specifier") — dynamic imports
+			if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length === 1) {
+				const arg = node.arguments[0];
+				if (ts.isStringLiteral(arg)) {
+					const spec = arg.text;
+					if (!spec.startsWith(".") && !spec.startsWith("/")) importPaths.add(spec);
+				}
+			}
+			ts.forEachChild(node, visit);
+		});
 	}
 
 	// Group by package name (first segment or @scope/name)
