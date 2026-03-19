@@ -3,9 +3,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
-  "alias": {
-    "@mariozechner/pi-ai/dist/utils/validation.js": "pi-worker/dist/validation-noop.js"
-  },
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
   "containers": [
     {
       "class_name": "Sandbox",
@@ -26,12 +28,6 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["Sandbox"]
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "FILES",
-      "bucket_name": "ffmpeg-agent-files"
     }
   ]
 }
