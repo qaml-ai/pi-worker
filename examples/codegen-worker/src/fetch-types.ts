@@ -54,6 +54,15 @@ export async function fetchDependencyTypes(
 		packageImports.get(pkgName)!.add(path);
 	}
 
+	// If project has React, ensure jsx-runtime is fetched (TS injects this import for jsx: react-jsx)
+	if (deps["react"] && !importPaths.has("react/jsx-runtime")) {
+		importPaths.add("react");
+		importPaths.add("react/jsx-runtime");
+		if (!packageImports.has("react")) packageImports.set("react", new Set());
+		packageImports.get("react")!.add("react");
+		packageImports.get("react")!.add("react/jsx-runtime");
+	}
+
 	const fetched: string[] = [];
 	const failed: string[] = [];
 
@@ -117,10 +126,16 @@ function scanRelativeImports(content: string, fileName: string): string[] {
 			const s = node.moduleSpecifier.text;
 			if (s.startsWith(".")) imports.push(s);
 		}
-		// import type references: /// <reference types="..." />
-		// These are less common but handle them too
 		ts.forEachChild(node, visit);
 	});
+
+	// Also scan for /// <reference path="..." /> directives
+	const refMatches = content.matchAll(/\/\/\/\s*<reference\s+path\s*=\s*["']([^"']+)["']\s*\/>/g);
+	for (const m of refMatches) {
+		if (m[1].startsWith(".")) imports.push(m[1]);
+		else imports.push("./" + m[1]); // treat bare paths as relative
+	}
+
 	return imports;
 }
 
@@ -133,31 +148,52 @@ async function fetchPackageTypes(
 	version: string,
 	importPaths: Set<string>,
 	files: Map<string, string>,
+	/** The original package name when falling back to @types/ */
+	originalName?: string,
 ): Promise<boolean> {
-	const pkg = await fetchPkgJson(name, version);
-	if (!pkg) {
+	let pkg = await fetchPkgJson(name, version);
+
+	// If the package has no types entry, try @types/
+	const hasTypes = pkg && (pkg.types || pkg.typings || (pkg.exports && resolveTypesPath(pkg, ".")));
+	if (!hasTypes && !name.startsWith("@types/")) {
 		const scopedName = name.startsWith("@")
 			? name.replace("@", "").replace("/", "__")
 			: name;
 		const typesPkg = await fetchPkgJson(`@types/${scopedName}`, "latest");
-		if (!typesPkg) return false;
-		return fetchPackageTypes(`@types/${scopedName}`, "latest", importPaths, files);
+		if (typesPkg) {
+			return fetchPackageTypes(`@types/${scopedName}`, "latest", importPaths, files, name);
+		}
 	}
+	if (!pkg) return false;
 
+	const baseName = originalName || name;
 	let anySuccess = false;
 
 	for (const importPath of importPaths) {
-		const subpath = importPath === name ? "." : "./" + importPath.slice(name.length + 1);
+		const subpath = importPath === baseName ? "." : "./" + importPath.slice(baseName.length + 1);
 		const typesPath = resolveTypesPath(pkg, subpath);
 		if (!typesPath) continue;
 
 		// Fetch the entry .d.ts and all its internal imports recursively
-		const fetched = await fetchDtsTree(name, version, typesPath);
+		const { files: fetched, externalDeps } = await fetchDtsTree(name, version, typesPath);
 
 		for (const [filePath, content] of fetched) {
-			// Map the package-internal path to a node_modules path the compiler can find
-			const nodeModulesPath = toNodeModulesPath(name, subpath, typesPath, filePath);
+			// Store under original package name so TS finds "react", not "@types/react"
+			const nodeModulesPath = toNodeModulesPath(baseName, subpath, typesPath, filePath);
 			files.set(nodeModulesPath, content);
+		}
+
+		// Fetch transitive external deps (e.g. csstype imported by @types/react)
+		for (const dep of externalDeps) {
+			if (files.has(`node_modules/${dep}/index.d.ts`)) continue; // already fetched
+			const depPkg = await fetchPkgJson(dep, "latest");
+			if (!depPkg) continue;
+			const depTypesPath = depPkg.types || depPkg.typings;
+			if (!depTypesPath) continue;
+			const { files: depFiles } = await fetchDtsTree(dep, "latest", depTypesPath);
+			for (const [fp, content] of depFiles) {
+				files.set(`node_modules/${dep}/${fp}`, content);
+			}
 		}
 
 		if (fetched.size > 0) anySuccess = true;
@@ -170,17 +206,23 @@ async function fetchPackageTypes(
  * Fetch a .d.ts file and recursively fetch all its relative imports.
  * Returns a Map of package-relative paths to content.
  */
+interface FetchDtsTreeResult {
+	files: Map<string, string>;
+	externalDeps: Set<string>;
+}
+
 async function fetchDtsTree(
 	name: string,
 	version: string,
 	entryPath: string,
-): Promise<Map<string, string>> {
+): Promise<FetchDtsTreeResult> {
 	const result = new Map<string, string>();
+	const externalDeps = new Set<string>();
 	const queue = [entryPath.replace(/^\.\//, "")];
 	const visited = new Set<string>();
 
 	while (queue.length > 0 && result.size < MAX_FILES_PER_PACKAGE) {
-		const batch = queue.splice(0, 10); // fetch in batches of 10
+		const batch = queue.splice(0, 10);
 		const fetches = batch
 			.filter((p) => !visited.has(p))
 			.map(async (filePath) => {
@@ -199,12 +241,26 @@ async function fetchDtsTree(
 					if (!resolved || visited.has(resolved)) continue;
 					queue.push(resolved);
 				}
+
+				// Scan for external imports (e.g. "csstype" in @types/react)
+				const sf = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, false);
+				ts.forEachChild(sf, function visit(node) {
+					if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+						const s = node.moduleSpecifier.text;
+						if (!s.startsWith(".") && !s.startsWith("/")) externalDeps.add(s);
+					}
+					if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+						const s = node.moduleSpecifier.text;
+						if (!s.startsWith(".") && !s.startsWith("/")) externalDeps.add(s);
+					}
+					ts.forEachChild(node, visit);
+				});
 			});
 
 		await Promise.all(fetches);
 	}
 
-	return result;
+	return { files: result, externalDeps };
 }
 
 /**
@@ -294,15 +350,26 @@ function resolveTypesPath(pkg: PkgJson, subpath: string): string | null {
 	if (pkg.exports) {
 		const entry = pkg.exports[subpath];
 		if (entry) {
-			if (typeof entry === "string" && entry.endsWith(".d.ts")) return entry;
-			if (typeof entry === "object" && entry !== null) {
-				const t = entry.types ?? entry.import?.types ?? entry.require?.types ?? entry.default?.types;
-				if (t) return t;
-			}
+			const resolved = extractTypesString(entry);
+			if (resolved) return resolved;
 		}
 	}
 	if (subpath === ".") {
 		return pkg.types || pkg.typings || null;
+	}
+	return null;
+}
+
+/** Recursively extract a .d.ts path from a conditional exports entry. */
+function extractTypesString(entry: any): string | null {
+	if (!entry) return null;
+	if (typeof entry === "string" && entry.endsWith(".d.ts")) return entry;
+	if (typeof entry === "object") {
+		// Try common keys: types, import.types, require.types, default
+		for (const key of ["types", "import", "require", "default"]) {
+			const result = extractTypesString(entry[key]);
+			if (result) return result;
+		}
 	}
 	return null;
 }

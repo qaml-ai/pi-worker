@@ -31,6 +31,9 @@ export function typeCheck(
 	files: Map<string, string>,
 	compilerOptions?: ts.CompilerOptions,
 ): TypeCheckResult {
+	// Detect if project has TSX files
+	const hasTsx = [...files.keys()].some((f) => f.endsWith(".tsx"));
+
 	const options: ts.CompilerOptions = compilerOptions ?? {
 		target: ts.ScriptTarget.ES2022,
 		module: ts.ModuleKind.ES2022,
@@ -40,6 +43,8 @@ export function typeCheck(
 		skipLibCheck: true,
 		noEmit: true,
 		types: [],
+		// Enable JSX if project has .tsx files
+		...(hasTsx ? { jsx: ts.JsxEmit.ReactJSX } : {}),
 	};
 
 	// Inject lib shim for global types

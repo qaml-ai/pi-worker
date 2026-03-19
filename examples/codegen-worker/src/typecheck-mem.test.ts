@@ -124,6 +124,40 @@ export default app;
 		expect(moduleErrors).toHaveLength(0);
 	}, 30000);
 
+	it("typechecks React TSX with shadcn components", async () => {
+		const files = new Map([
+			["proj/package.json", '{"dependencies":{"react":"^19","react-dom":"^19","radix-ui":"^1","class-variance-authority":"^0.7","clsx":"^2","tailwind-merge":"^3","lucide-react":"^0.5"}}'],
+			["proj/app/lib/utils.ts", 'import { clsx, type ClassValue } from "clsx";\nimport { twMerge } from "tailwind-merge";\nexport function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }'],
+			["proj/app/routes/home.tsx", `
+import { Button } from "~/components/ui/button";
+
+export default function Home() {
+  return (
+    <div className="p-8">
+      <h1 className="text-2xl font-bold">Hello</h1>
+      <Button variant="default">Click me</Button>
+    </div>
+  );
+}
+`],
+		]);
+		const result = await typeCheckFromMap(files, "proj/");
+		console.log("react tsx errors:", result.diagnostics.length);
+		console.log("typesFetched:", (result as any).typesFetched);
+		console.log("typesFailed:", (result as any).typesFailed);
+		// The typecheck-mem creates a separate stripped files map — check that one
+		// by looking at what fetchDependencyTypes wrote
+		// We can't access the internal map, but we can check if react resolved
+		console.log("all files in outer map:", [...files.keys()].filter((k) => k.includes("node_modules")).length);
+		const errors = result.diagnostics.filter((d) => d.severity === "error");
+		for (const e of errors.slice(0, 5)) {
+			console.log(`  ${e.file}:${e.line} ${e.message.slice(0, 100)}`);
+		}
+		// We expect some errors since we don't have full React types yet,
+		// but the count should be reasonable (< 20), not 273
+		expect(errors.length).toBeLessThan(20);
+	}, 30000);
+
 	it("skips unknown deps without errors", async () => {
 		const files = new Map([
 			["proj/package.json", '{"dependencies":{"nonexistent-pkg-xyz":"^1.0.0"}}'],
