@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createShadcnTool } from "./shadcn-tool.js";
 
 describe("createShadcnTool", () => {
-	it("installs a single component", async () => {
+	it("installs a single component (radix-mira style)", async () => {
 		const files = new Map<string, string>();
 		const tool = createShadcnTool(files);
 
@@ -15,6 +15,9 @@ describe("createShadcnTool", () => {
 		const buttonContent = files.get("src/components/ui/button.tsx")!;
 		expect(buttonContent).toContain("React");
 		expect(buttonContent).toContain("variant");
+		// Import paths should be rewritten from registry paths
+		expect(buttonContent).not.toContain("@/registry/");
+		expect(buttonContent).toContain("@/lib/utils");
 	}, 15000);
 
 	it("installs multiple components", async () => {

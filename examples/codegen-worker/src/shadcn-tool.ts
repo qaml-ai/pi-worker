@@ -17,7 +17,7 @@
 
 import { Type, type Static } from "@sinclair/typebox";
 
-const REGISTRY_BASE = "https://ui.shadcn.com/r/styles/new-york";
+const REGISTRY_BASE = "https://ui.shadcn.com/r/styles/radix-mira";
 const FETCH_TIMEOUT_MS = 5000;
 
 interface RegistryItem {
@@ -97,10 +97,14 @@ export function createShadcnTool(
 						continue;
 					}
 
-					// Write component files
+					// Write component files (fix registry import paths)
 					for (const file of item.files) {
 						const filePath = `${prefix}${componentDir}/${file.path}`;
-						files.set(filePath, file.content);
+						const content = file.content
+							.replace(/@\/registry\/[^/]+\/lib\//g, "@/lib/")
+							.replace(/@\/registry\/[^/]+\/ui\//g, "@/components/ui/")
+							.replace(/@\/registry\/[^/]+\/hooks\//g, "@/hooks/");
+						files.set(filePath, content);
 					}
 
 					// Track npm dependencies
