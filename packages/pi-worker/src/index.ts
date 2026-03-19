@@ -16,6 +16,7 @@ export {
 	createR2LsTool,
 	type R2ToolOptions,
 	// Exported for testing
+	sanitizePath,
 	normalizeForFuzzyMatch,
 	fuzzyFindText,
 	generateDiffString,

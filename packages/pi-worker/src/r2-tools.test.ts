@@ -1,5 +1,48 @@
 import { describe, it, expect } from "vitest";
-import { normalizeForFuzzyMatch, fuzzyFindText, generateDiffString } from "./r2-tools.js";
+import { sanitizePath, normalizeForFuzzyMatch, fuzzyFindText, generateDiffString } from "./r2-tools.js";
+
+describe("sanitizePath", () => {
+	it("normalizes simple paths", () => {
+		expect(sanitizePath("src/index.ts")).toBe("src/index.ts");
+		expect(sanitizePath("/src/index.ts")).toBe("src/index.ts");
+		expect(sanitizePath("src/index.ts/")).toBe("src/index.ts");
+	});
+
+	it("collapses double slashes", () => {
+		expect(sanitizePath("src//utils//index.ts")).toBe("src/utils/index.ts");
+	});
+
+	it("resolves . segments", () => {
+		expect(sanitizePath("src/./index.ts")).toBe("src/index.ts");
+		expect(sanitizePath("./src/index.ts")).toBe("src/index.ts");
+	});
+
+	it("resolves safe .. segments", () => {
+		expect(sanitizePath("src/utils/../index.ts")).toBe("src/index.ts");
+		expect(sanitizePath("a/b/c/../../d.ts")).toBe("a/d.ts");
+	});
+
+	it("rejects .. that escapes root", () => {
+		expect(() => sanitizePath("../etc/passwd")).toThrow("escapes root");
+		expect(() => sanitizePath("src/../../etc/passwd")).toThrow("escapes root");
+		expect(() => sanitizePath("../../.env")).toThrow("escapes root");
+	});
+
+	it("rejects null bytes", () => {
+		expect(() => sanitizePath("src/index\0.ts")).toThrow("null bytes");
+	});
+
+	it("rejects paths that resolve to empty", () => {
+		expect(() => sanitizePath("")).toThrow("resolves to empty");
+		expect(() => sanitizePath("/")).toThrow("resolves to empty");
+		expect(() => sanitizePath(".")).toThrow("resolves to empty");
+		expect(() => sanitizePath("./")).toThrow("resolves to empty");
+	});
+
+	it("handles deeply nested paths", () => {
+		expect(sanitizePath("a/b/c/d/e/f.ts")).toBe("a/b/c/d/e/f.ts");
+	});
+});
 
 describe("normalizeForFuzzyMatch", () => {
 	it("strips trailing whitespace per line", () => {

@@ -17,15 +17,47 @@ export interface R2ToolOptions {
 	prefix?: string;
 }
 
+/**
+ * Normalize and sanitize a path, then prepend the prefix.
+ * Rejects path traversal attempts (../) and null bytes.
+ */
 function toKey(path: string, prefix?: string): string {
-	const key = path.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\/\/+/g, "/");
-	return prefix ? `${prefix.replace(/\/+$/, "")}/${key}` : key;
+	const sanitized = sanitizePath(path);
+	return prefix ? `${prefix.replace(/\/+$/, "")}/${sanitized}` : sanitized;
 }
 
 function dirPrefix(path: string, prefix?: string): string {
 	const base = prefix ? `${prefix.replace(/\/+$/, "")}/` : "";
-	const key = (path || "").replace(/^\/+/, "").replace(/\/+$/, "").replace(/\/\/+/g, "/");
-	return key ? `${base}${key}/` : base;
+	if (!path || path === "." || path === "/") return base;
+	const sanitized = sanitizePath(path);
+	return `${base}${sanitized}/`;
+}
+
+/** Exported for testing. */
+export function sanitizePath(path: string): string {
+	if (path.includes("\0")) throw new Error("Invalid path: null bytes not allowed");
+
+	// Normalize: strip leading/trailing slashes, collapse doubles
+	let normalized = path
+		.replace(/^\/+/, "")
+		.replace(/\/+$/, "")
+		.replace(/\/\/+/g, "/");
+
+	// Resolve . and .. segments
+	const parts = normalized.split("/");
+	const resolved: string[] = [];
+	for (const part of parts) {
+		if (part === "." || part === "") continue;
+		if (part === "..") {
+			if (resolved.length === 0) throw new Error(`Invalid path: "${path}" escapes root`);
+			resolved.pop();
+		} else {
+			resolved.push(part);
+		}
+	}
+
+	if (resolved.length === 0) throw new Error(`Invalid path: "${path}" resolves to empty`);
+	return resolved.join("/");
 }
 
 // ---------------------------------------------------------------------------
