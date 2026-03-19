@@ -1,7 +1,11 @@
 /**
  * Codegen Worker — generates multi-file Cloudflare Worker projects.
  *
- * POST { prompt } → agent writes files to R2 → typechecks → zips → returns signed download URL
+ * Queue-based: returns a job ID immediately, runs the agent in a queue consumer.
+ *
+ * POST /generate { prompt }     → { jobId }
+ * GET  /jobs/:id                → { status, downloadUrl?, error? }
+ * GET  /download/:key?sig=...   → file download
  */
 
 import {
@@ -20,7 +24,29 @@ interface Env {
 	ANTHROPIC_API_KEY: string;
 	DOWNLOAD_SECRET: string;
 	FILES: R2Bucket;
+	JOBS: KVNamespace;
+	CODEGEN_QUEUE: Queue<JobMessage>;
 }
+
+interface JobMessage {
+	jobId: string;
+	prompt: string;
+}
+
+interface JobStatus {
+	status: "pending" | "running" | "complete" | "error";
+	downloadUrl?: string;
+	summary?: string;
+	typeCheck?: { success: boolean; errors: number; fixes: number };
+	toolCalls?: string[];
+	error?: string;
+	createdAt: number;
+	completedAt?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Shared
+// ---------------------------------------------------------------------------
 
 const SYSTEM_PROMPT = `You are a Cloudflare Worker codebase generator. When the user describes an app, create a complete, production-ready multi-file project.
 
@@ -55,94 +81,147 @@ async function zipProject(bucket: R2Bucket, prefix: string): Promise<Uint8Array>
 	return zipSync(files, { level: 6 });
 }
 
+// ---------------------------------------------------------------------------
+// Worker (HTTP handler)
+// ---------------------------------------------------------------------------
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
+		const url = new URL(request.url);
 		const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
 
+		// Serve signed downloads
 		const served = await downloads.serve(request);
 		if (served) return served;
 
-		if (request.method !== "POST") {
-			return Response.json({
-				usage: "POST { prompt } — describe the Worker app you want, get a download URL",
-				example: { prompt: "Create a URL shortener with D1 database" },
-			});
+		// GET /jobs/:id — check job status
+		if (request.method === "GET" && url.pathname.startsWith("/jobs/")) {
+			const jobId = url.pathname.slice("/jobs/".length);
+			const raw = await env.JOBS.get(jobId);
+			if (!raw) return Response.json({ error: "Job not found" }, { status: 404 });
+			return Response.json(JSON.parse(raw));
 		}
 
-		const body = (await request.json()) as { prompt?: string };
-		if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
+		// POST /generate — enqueue a new job
+		if (request.method === "POST" && url.pathname === "/generate") {
+			const body = (await request.json()) as { prompt?: string };
+			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
-		const projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-		const prefix = `${projectId}/`;
+			const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+			const status: JobStatus = { status: "pending", createdAt: Date.now() };
 
-		try {
-			const agent = new Agent({
-				initialState: {
-					systemPrompt: SYSTEM_PROMPT,
-					model: getModel("anthropic", "claude-sonnet-4-20250514"),
-					thinkingLevel: "off",
-					tools: [
-						createR2WriteTool(env.FILES),
-						createR2ReadTool(env.FILES),
-						createR2EditTool(env.FILES),
-						createR2LsTool(env.FILES),
-					],
-				},
-				getApiKey: async () => env.ANTHROPIC_API_KEY,
-			});
+			await env.JOBS.put(jobId, JSON.stringify(status), { expirationTtl: 3600 });
+			await env.CODEGEN_QUEUE.send({ jobId, prompt: body.prompt });
 
-			const toolCalls: string[] = [];
-			agent.subscribe((e) => {
-				if (e.type === "tool_execution_start") {
-					toolCalls.push(`${(e as any).toolName}`);
+			return Response.json({ jobId, status: "pending" });
+		}
+
+		return Response.json({
+			endpoints: {
+				"POST /generate": "{ prompt } → { jobId }",
+				"GET /jobs/:id": "→ { status, downloadUrl?, error? }",
+			},
+			example: {
+				"1. Start": "curl -X POST /generate -d '{\"prompt\": \"URL shortener with D1\"}'",
+				"2. Poll": "curl /jobs/<jobId>",
+				"3. Download": "curl <downloadUrl>",
+			},
+		});
+	},
+
+	// ---------------------------------------------------------------------------
+	// Queue consumer (runs the agent — up to 15 min timeout)
+	// ---------------------------------------------------------------------------
+
+	async queue(batch: MessageBatch<JobMessage>, env: Env): Promise<void> {
+		for (const msg of batch.messages) {
+			const { jobId, prompt } = msg.body;
+
+			const updateStatus = async (update: Partial<JobStatus>) => {
+				const raw = await env.JOBS.get(jobId);
+				const current: JobStatus = raw ? JSON.parse(raw) : { status: "running", createdAt: Date.now() };
+				const updated = { ...current, ...update };
+				await env.JOBS.put(jobId, JSON.stringify(updated), { expirationTtl: 3600 });
+			};
+
+			try {
+				await updateStatus({ status: "running" });
+
+				const projectId = jobId.replace("job_", "proj_");
+				const prefix = `${projectId}/`;
+
+				const agent = new Agent({
+					initialState: {
+						systemPrompt: SYSTEM_PROMPT,
+						model: getModel("anthropic", "claude-sonnet-4-20250514"),
+						thinkingLevel: "off",
+						tools: [
+							createR2WriteTool(env.FILES),
+							createR2ReadTool(env.FILES),
+							createR2EditTool(env.FILES),
+							createR2LsTool(env.FILES),
+						],
+					},
+					getApiKey: async () => env.ANTHROPIC_API_KEY,
+				});
+
+				const toolCalls: string[] = [];
+				agent.subscribe((e) => {
+					if (e.type === "tool_execution_start") toolCalls.push((e as any).toolName);
+				});
+
+				await agent.prompt(`Project directory: "${projectId}"\n\n${prompt}`);
+
+				if (agent.state.error) {
+					await updateStatus({ status: "error", error: agent.state.error, toolCalls });
+					msg.ack();
+					continue;
 				}
-			});
 
-			await agent.prompt(`Project directory: "${projectId}"\n\n${body.prompt}`);
+				// Typecheck with auto-fix loop
+				let tc = await typeCheckR2Project(env.FILES, prefix);
+				let fixes = 0;
+				while (!tc.success && fixes < 2) {
+					fixes++;
+					const errors = tc.diagnostics
+						.filter((d) => d.severity === "error")
+						.map((d) => `${d.file ?? "?"}:${d.line ?? "?"} - ${d.message}`)
+						.join("\n");
+					await agent.prompt(`TypeScript errors found. Fix them:\n\n${errors}`);
+					if (agent.state.error) break;
+					tc = await typeCheckR2Project(env.FILES, prefix);
+				}
 
-			if (agent.state.error) {
-				return Response.json({ error: agent.state.error }, { status: 500 });
+				// Zip and store
+				const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
+				const zipData = await zipProject(env.FILES, prefix);
+				const zipKey = `${prefix}__download.zip`;
+				const downloadPath = await downloads.store(zipKey, zipData, {
+					contentType: "application/zip",
+					filename: "project.zip",
+				});
+
+				const msgs = agent.state.messages.filter((m) => m.role === "assistant");
+				const last = msgs[msgs.length - 1];
+				const summary = last?.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
+
+				await updateStatus({
+					status: "complete",
+					downloadUrl: downloadPath,
+					summary,
+					typeCheck: {
+						success: tc.success,
+						errors: tc.diagnostics.filter((d) => d.severity === "error").length,
+						fixes,
+					},
+					toolCalls,
+					completedAt: Date.now(),
+				});
+			} catch (error: any) {
+				await updateStatus({ status: "error", error: error.message, completedAt: Date.now() });
 			}
 
-			// Typecheck with auto-fix loop
-			let tc = await typeCheckR2Project(env.FILES, prefix);
-			let fixes = 0;
-			while (!tc.success && fixes < 2) {
-				fixes++;
-				const errors = tc.diagnostics
-					.filter((d) => d.severity === "error")
-					.map((d) => `${d.file ?? "?"}:${d.line ?? "?"} - ${d.message}`)
-					.join("\n");
-				await agent.prompt(`TypeScript errors found. Fix them:\n\n${errors}`);
-				if (agent.state.error) break;
-				tc = await typeCheckR2Project(env.FILES, prefix);
-			}
-
-			// Zip and store
-			const zipData = await zipProject(env.FILES, prefix);
-			const zipKey = `${prefix}__download.zip`;
-			const downloadPath = await downloads.store(zipKey, zipData, {
-				contentType: "application/zip",
-				filename: "project.zip",
-			});
-
-			const msgs = agent.state.messages.filter((m) => m.role === "assistant");
-			const last = msgs[msgs.length - 1];
-			const summary = last?.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
-
-			return Response.json({
-				downloadUrl: new URL(downloadPath, request.url).href,
-				projectId,
-				summary,
-				typeCheck: {
-					success: tc.success,
-					errors: tc.diagnostics.filter((d) => d.severity === "error").length,
-					fixes,
-				},
-				toolCalls,
-			});
-		} catch (error: any) {
-			return Response.json({ error: error.message }, { status: 500 });
+			msg.ack();
 		}
 	},
 };

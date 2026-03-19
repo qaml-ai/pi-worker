@@ -6,7 +6,6 @@
   "alias": {
     "@mariozechner/pi-ai/dist/utils/validation.js": "pi-worker/dist/validation-noop.js"
   },
-  // TypeScript compiler uses __filename in its Node system init
   "define": {
     "__filename": "\"/typescript.js\"",
     "__dirname": "\"/\""
@@ -16,5 +15,26 @@
       "binding": "FILES",
       "bucket_name": "codegen-files"
     }
-  ]
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "JOBS",
+      "id": "codegen-jobs"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "CODEGEN_QUEUE",
+        "queue": "codegen-queue"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "codegen-queue",
+        "max_batch_size": 1,
+        "max_retries": 0
+      }
+    ]
+  }
 }
