@@ -1,9 +1,9 @@
 /**
  * R2-backed filesystem tools for pi-mono's agent.
  *
- * Implements read, write, edit, and ls using an R2 bucket instead of POSIX fs.
- * Keys are normalized paths (no leading slash).
- * "Directories" are simulated via prefix listing — R2 is a flat key-value store.
+ * All tools accept an optional `prefix` for tenant isolation — the agent
+ * sees paths like "src/index.ts" but they map to R2 keys like
+ * "tenant_123/src/index.ts". The prefix is invisible to the agent.
  *
  * The edit tool uses pi-mono's real algorithm: fuzzy matching with Unicode
  * normalization, BOM preservation, CRLF/LF detection, and diff generation.
@@ -12,14 +12,20 @@
 import * as Diff from "diff";
 import { Type, type Static } from "@sinclair/typebox";
 
-/** Normalize a path to an R2 key. */
-function toKey(path: string): string {
-	return path.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\/\/+/g, "/");
+export interface R2ToolOptions {
+	/** Key prefix for tenant isolation. The agent never sees this prefix. */
+	prefix?: string;
 }
 
-function dirPrefix(path: string): string {
-	const key = toKey(path || "");
-	return key ? key + "/" : "";
+function toKey(path: string, prefix?: string): string {
+	const key = path.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\/\/+/g, "/");
+	return prefix ? `${prefix.replace(/\/+$/, "")}/${key}` : key;
+}
+
+function dirPrefix(path: string, prefix?: string): string {
+	const base = prefix ? `${prefix.replace(/\/+$/, "")}/` : "";
+	const key = (path || "").replace(/^\/+/, "").replace(/\/+$/, "").replace(/\/\/+/g, "/");
+	return key ? `${base}${key}/` : base;
 }
 
 // ---------------------------------------------------------------------------
@@ -32,7 +38,7 @@ const readSchema = Type.Object({
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
 });
 
-export function createR2ReadTool(bucket: R2Bucket) {
+export function createR2ReadTool(bucket: R2Bucket, options?: R2ToolOptions) {
 	return {
 		name: "read" as const,
 		label: "read",
@@ -40,7 +46,7 @@ export function createR2ReadTool(bucket: R2Bucket) {
 			"Read the contents of a file from storage. Output is truncated to 500 lines. Use offset/limit for large files.",
 		parameters: readSchema,
 		execute: async (_id: string, { path, offset, limit }: Static<typeof readSchema>) => {
-			const obj = await bucket.get(toKey(path));
+			const obj = await bucket.get(toKey(path, options?.prefix));
 			if (!obj) throw new Error(`File not found: ${path}`);
 
 			const allLines = (await obj.text()).split("\n");
@@ -66,14 +72,14 @@ const writeSchema = Type.Object({
 	content: Type.String({ description: "Content to write to the file" }),
 });
 
-export function createR2WriteTool(bucket: R2Bucket) {
+export function createR2WriteTool(bucket: R2Bucket, options?: R2ToolOptions) {
 	return {
 		name: "write" as const,
 		label: "write",
 		description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
 		parameters: writeSchema,
 		execute: async (_id: string, { path, content }: Static<typeof writeSchema>) => {
-			await bucket.put(toKey(path), content);
+			await bucket.put(toKey(path, options?.prefix), content);
 			return { content: [{ type: "text" as const, text: `Successfully wrote ${content.length} bytes to ${path}` }], details: {} };
 		},
 	};
@@ -91,7 +97,8 @@ function normalizeToLF(t: string) { return t.replace(/\r\n/g, "\n").replace(/\r/
 function restoreLineEndings(t: string, e: "\r\n" | "\n") { return e === "\r\n" ? t.replace(/\n/g, "\r\n") : t; }
 function stripBom(c: string) { return c.startsWith("\uFEFF") ? { bom: "\uFEFF", text: c.slice(1) } : { bom: "", text: c }; }
 
-function normalizeForFuzzyMatch(text: string): string {
+// Exported for testing
+export function normalizeForFuzzyMatch(text: string): string {
 	return text.normalize("NFKC")
 		.split("\n").map((l) => l.trimEnd()).join("\n")
 		.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
@@ -100,7 +107,8 @@ function normalizeForFuzzyMatch(text: string): string {
 		.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
 }
 
-function fuzzyFindText(content: string, oldText: string) {
+// Exported for testing
+export function fuzzyFindText(content: string, oldText: string) {
 	const exact = content.indexOf(oldText);
 	if (exact !== -1) return { found: true, index: exact, matchLength: oldText.length, contentForReplacement: content };
 
@@ -111,7 +119,7 @@ function fuzzyFindText(content: string, oldText: string) {
 	return { found: true, index: fi, matchLength: fo.length, contentForReplacement: fc };
 }
 
-function generateDiffString(oldContent: string, newContent: string, ctx = 4) {
+export function generateDiffString(oldContent: string, newContent: string, ctx = 4) {
 	const parts = Diff.diffLines(oldContent, newContent);
 	const output: string[] = [];
 	const w = String(Math.max(oldContent.split("\n").length, newContent.split("\n").length)).length;
@@ -150,14 +158,15 @@ const editSchema = Type.Object({
 	newText: Type.String({ description: "New text to replace the old text with" }),
 });
 
-export function createR2EditTool(bucket: R2Bucket) {
+export function createR2EditTool(bucket: R2Bucket, options?: R2ToolOptions) {
 	return {
 		name: "edit" as const,
 		label: "edit",
 		description: "Edit a file by replacing exact text. Supports fuzzy matching for smart quotes, Unicode dashes, and trailing whitespace.",
 		parameters: editSchema,
 		execute: async (_id: string, { path, oldText, newText }: Static<typeof editSchema>) => {
-			const obj = await bucket.get(toKey(path));
+			const key = toKey(path, options?.prefix);
+			const obj = await bucket.get(key);
 			if (!obj) throw new Error(`File not found: ${path}`);
 
 			const { bom, text: content } = stripBom(await obj.text());
@@ -174,7 +183,7 @@ export function createR2EditTool(bucket: R2Bucket) {
 			const result = base.substring(0, match.index) + nn + base.substring(match.index + match.matchLength);
 			if (base === result) throw new Error(`No changes made to ${path}.`);
 
-			await bucket.put(toKey(path), bom + restoreLineEndings(result, ending));
+			await bucket.put(key, bom + restoreLineEndings(result, ending));
 			const d = generateDiffString(base, result);
 
 			return {
@@ -194,20 +203,21 @@ const lsSchema = Type.Object({
 	limit: Type.Optional(Type.Number({ description: "Maximum entries to return (default: 500)" })),
 });
 
-export function createR2LsTool(bucket: R2Bucket) {
+export function createR2LsTool(bucket: R2Bucket, options?: R2ToolOptions) {
 	return {
 		name: "ls" as const,
 		label: "ls",
 		description: "List files and directories. Entries sorted alphabetically, '/' suffix for directories.",
 		parameters: lsSchema,
 		execute: async (_id: string, { path, limit }: Static<typeof lsSchema>) => {
-			const prefix = dirPrefix(path || "");
+			const prefix = dirPrefix(path || "", options?.prefix);
+			const stripPrefix = prefix;
 			const max = limit ?? 500;
 			const listed = await bucket.list({ prefix: prefix || undefined, delimiter: "/", limit: max });
 
 			const entries: string[] = [];
-			for (const dp of listed.delimitedPrefixes) { const n = dp.slice(prefix.length); if (n) entries.push(n); }
-			for (const obj of listed.objects) { const n = obj.key.slice(prefix.length); if (n) entries.push(n); }
+			for (const dp of listed.delimitedPrefixes) { const n = dp.slice(stripPrefix.length); if (n) entries.push(n); }
+			for (const obj of listed.objects) { const n = obj.key.slice(stripPrefix.length); if (n) entries.push(n); }
 			entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
 			if (entries.length === 0) return { content: [{ type: "text" as const, text: "(empty directory)" }], details: {} };

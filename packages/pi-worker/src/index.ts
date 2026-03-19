@@ -1,21 +1,32 @@
 /**
  * pi-worker — Run pi-mono agents in Cloudflare Workers.
  *
- * Three things:
- * 1. R2-backed file tools (read, write, edit, ls)
+ * Four primitives:
+ * 1. R2-backed file tools (read, write, edit, ls) with optional prefix for tenant isolation
  * 2. Generic execute tool (run code in a Dynamic Worker Loader with injected helpers)
- * 3. Validation noop (wrangler alias target for ajv workaround)
+ * 3. Signed download URLs (store, sign, serve)
+ * 4. Validation noop (wrangler alias target for ajv workaround)
  */
 
 // R2 file tools
-export { createR2ReadTool, createR2WriteTool, createR2EditTool, createR2LsTool } from "./r2-tools.js";
+export {
+	createR2ReadTool,
+	createR2WriteTool,
+	createR2EditTool,
+	createR2LsTool,
+	type R2ToolOptions,
+	// Exported for testing
+	normalizeForFuzzyMatch,
+	fuzzyFindText,
+	generateDiffString,
+} from "./r2-tools.js";
 
 // Code execution tool
-export { createExecuteTool, type ExecuteToolHelpers } from "./execute-tool.js";
+export { createExecuteTool, type ExecuteToolHelpers, type ExecuteToolOptions } from "./execute-tool.js";
 
 // Signed download URLs
 export { createDownloadHandler, type DownloadHandler, type StoreOptions } from "./downloads.js";
 
-// Re-exports from pi-mono for convenience
+// Re-exports from pi-mono
 export { Agent } from "@mariozechner/pi-agent-core";
 export { getModel } from "@mariozechner/pi-ai";
