@@ -87,6 +87,20 @@ describe("typeCheckFromMap", () => {
 		expect(moduleErrors).toHaveLength(0);
 	}, 15000);
 
+	it("fetches hono subpath imports (hono/cors)", async () => {
+		const files = new Map([
+			["proj/package.json", '{"dependencies":{"hono":"^4.0.0"}}'],
+			["proj/src/index.ts", 'import { Hono } from "hono";\nimport { cors } from "hono/cors";\nconst app = new Hono();\napp.use("*", cors());\nexport default app;'],
+		]);
+		const result = await typeCheckFromMap(files, "proj/");
+		console.log("hono/cors diagnostics:", result.diagnostics.map((d) => `${d.file}:${d.line} ${d.message}`));
+		console.log("typesFetched:", (result as any).typesFetched);
+		const moduleErrors = result.diagnostics.filter(
+			(d) => d.severity === "error" && d.message.includes("Cannot find module")
+		);
+		expect(moduleErrors).toHaveLength(0);
+	}, 15000);
+
 	it("skips unknown deps without errors", async () => {
 		const files = new Map([
 			["proj/package.json", '{"dependencies":{"nonexistent-pkg-xyz":"^1.0.0"}}'],
