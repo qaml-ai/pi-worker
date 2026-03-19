@@ -110,8 +110,9 @@ export default {
 		const workdir = `/data/${requestId}`;
 
 		try {
-			// Mount the whole R2 bucket once (idempotent — no-ops if already mounted)
-			try {
+			// Mount R2 bucket if not already mounted (reused containers keep their mounts)
+			const mountCheck = await sandbox.exec("mountpoint -q /data 2>/dev/null; echo $?");
+			if (mountCheck.stdout.trim() !== "0") {
 				await sandbox.mountBucket("ffmpeg-agent-files", "/data", {
 					endpoint: env.R2_ENDPOINT,
 					credentials: {
@@ -119,9 +120,6 @@ export default {
 						secretAccessKey: env.R2_SECRET_ACCESS_KEY,
 					},
 				});
-			} catch (e: any) {
-				// Ignore "already mounted" errors on reused containers
-				if (!e.message?.includes("already mounted") && !e.message?.includes("mount point")) throw e;
 			}
 
 			// Upload input files to R2 under request prefix
