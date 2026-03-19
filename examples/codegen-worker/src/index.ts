@@ -17,7 +17,9 @@ import {
 	createDownloadHandler,
 } from "pi-worker";
 import { zipSync, strToU8 } from "fflate";
-import { typeCheckFromMap } from "./typecheck-mem.js";
+// Dynamic import — avoid loading the 9MB TS compiler at Worker startup
+// This way the queue consumer doesn't OOM before processing messages
+const loadTypeChecker = () => import("./typecheck-mem.js").then((m) => m.typeCheckFromMap);
 
 interface Env {
 	OPENROUTER_API_KEY: string;
@@ -125,7 +127,7 @@ export default {
 			await agent.prompt(`Project directory: "${projectId}"\n\n${body.prompt}`);
 
 			// Typecheck
-			const tc = await typeCheckFromMap(files, prefix);
+			const tc = await (await loadTypeChecker())(files, prefix);
 
 			return Response.json({
 				projectId,
@@ -191,7 +193,7 @@ export default {
 				}
 
 				// Typecheck with auto-fix
-				let tc = await typeCheckFromMap(files, prefix);
+				let tc = await (await loadTypeChecker())(files, prefix);
 				let fixes = 0;
 				while (!tc.success && fixes < 2) {
 					fixes++;
@@ -201,7 +203,7 @@ export default {
 						.join("\n");
 					await agent.prompt(`TypeScript errors found. Fix them:\n\n${errors}`);
 					if (agent.state.error) break;
-					tc = await typeCheckFromMap(files, prefix);
+					tc = await (await loadTypeChecker())(files, prefix);
 				}
 
 				// Zip in-memory, write once to R2
