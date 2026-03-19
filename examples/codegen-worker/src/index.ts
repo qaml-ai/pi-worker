@@ -66,14 +66,14 @@ function zipFiles(files: Map<string, string>, prefix: string): Uint8Array {
 	return zipSync(entries, { level: 6 });
 }
 
-function runAgent(prompt: string, projectId: string, apiKey: string) {
+function runAgent(prompt: string, projectId: string, apiKey: string, modelId?: string) {
 	const files = new Map<string, string>();
 	const prefix = `${projectId}/`;
 
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: SYSTEM_PROMPT,
-			model: getModel("openrouter", "google/gemini-3-flash-preview"),
+			model: getModel("openrouter", (modelId || "google/gemini-3-flash-preview") as any),
 			thinkingLevel: "off",
 			tools: createMemoryTools(files),
 		},
@@ -105,11 +105,11 @@ export default {
 
 		// POST /debug — synchronous with transcript
 		if (request.method === "POST" && url.pathname === "/debug") {
-			const body = (await request.json()) as { prompt?: string };
+			const body = (await request.json()) as { prompt?: string; model?: string };
 			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
 			const projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-			const { agent, files, prefix } = runAgent(body.prompt, projectId, env.OPENROUTER_API_KEY);
+			const { agent, files, prefix } = runAgent(body.prompt, projectId, env.OPENROUTER_API_KEY, body.model);
 
 			const transcript: any[] = [];
 			agent.subscribe((e) => {
