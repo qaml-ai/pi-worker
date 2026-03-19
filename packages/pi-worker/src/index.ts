@@ -22,6 +22,16 @@ export {
 	generateDiffString,
 } from "./r2-tools.js";
 
+// In-memory file tools
+export {
+	createMemoryReadTool,
+	createMemoryWriteTool,
+	createMemoryEditTool,
+	createMemoryLsTool,
+	createMemoryTools,
+	type MemoryToolOptions,
+} from "./memory-tools.js";
+
 // Code execution tool
 export { createExecuteTool, type ExecuteToolHelpers, type ExecuteToolOptions } from "./execute-tool.js";
 

@@ -1,24 +1,23 @@
 /**
  * Codegen Worker — generates multi-file Cloudflare Worker projects.
  *
- * Queue-based: returns a job ID immediately, runs the agent in a queue consumer.
+ * Agent operates on an in-memory filesystem (Map). Only the final zip
+ * is written to R2 for download. No per-file R2 operations.
  *
  * POST /generate { prompt }     → { jobId }
  * GET  /jobs/:id                → { status, downloadUrl?, error? }
  * GET  /download/:key?sig=...   → file download
+ * POST /debug { prompt }        → { projectId, transcript } (sync, for dev)
  */
 
 import {
 	Agent,
 	getModel,
-	createR2ReadTool,
-	createR2WriteTool,
-	createR2EditTool,
-	createR2LsTool,
+	createMemoryTools,
 	createDownloadHandler,
 } from "pi-worker";
 import { zipSync, strToU8 } from "fflate";
-import { typeCheckR2Project } from "./typecheck.js";
+import { typeCheckFromMap } from "./typecheck-mem.js";
 
 interface Env {
 	OPENROUTER_API_KEY: string;
@@ -44,10 +43,6 @@ interface JobStatus {
 	completedAt?: number;
 }
 
-// ---------------------------------------------------------------------------
-// Shared
-// ---------------------------------------------------------------------------
-
 const SYSTEM_PROMPT = `You are a Cloudflare Worker codebase generator. When the user describes an app, create a complete, production-ready multi-file project.
 
 RULES:
@@ -60,29 +55,36 @@ RULES:
 7. Do NOT include node_modules, lock files, or .git
 8. After creating all files, use ls to confirm the structure`;
 
-async function zipProject(bucket: R2Bucket, prefix: string): Promise<Uint8Array> {
-	const files: Record<string, Uint8Array> = {};
-	let cursor: string | undefined;
-	let hasMore = true;
-
-	while (hasMore) {
-		const listed = await bucket.list({ prefix, cursor, limit: 500 });
-		for (const obj of listed.objects) {
-			const body = await bucket.get(obj.key);
-			if (!body) continue;
-			const rel = obj.key.slice(prefix.length);
-			if (rel) files[rel] = strToU8(await body.text());
-		}
-		hasMore = listed.truncated;
-		if (listed.truncated && listed.cursor) cursor = listed.cursor;
+function zipFiles(files: Map<string, string>, prefix: string): Uint8Array {
+	const entries: Record<string, Uint8Array> = {};
+	for (const [key, content] of files) {
+		if (!key.startsWith(prefix)) continue;
+		const rel = key.slice(prefix.length);
+		if (rel) entries[rel] = strToU8(content);
 	}
+	if (Object.keys(entries).length === 0) throw new Error("No files to zip");
+	return zipSync(entries, { level: 6 });
+}
 
-	if (Object.keys(files).length === 0) throw new Error("No files to zip");
-	return zipSync(files, { level: 6 });
+function runAgent(prompt: string, projectId: string, apiKey: string) {
+	const files = new Map<string, string>();
+	const prefix = `${projectId}/`;
+
+	const agent = new Agent({
+		initialState: {
+			systemPrompt: SYSTEM_PROMPT,
+			model: getModel("openrouter", "google/gemini-3-flash-preview"),
+			thinkingLevel: "off",
+			tools: createMemoryTools(files),
+		},
+		getApiKey: async () => apiKey,
+	});
+
+	return { agent, files, prefix };
 }
 
 // ---------------------------------------------------------------------------
-// Worker (HTTP handler)
+// Worker
 // ---------------------------------------------------------------------------
 
 export default {
@@ -90,11 +92,10 @@ export default {
 		const url = new URL(request.url);
 		const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
 
-		// Serve signed downloads
 		const served = await downloads.serve(request);
 		if (served) return served;
 
-		// GET /jobs/:id — check job status
+		// GET /jobs/:id
 		if (request.method === "GET" && url.pathname.startsWith("/jobs/")) {
 			const jobId = url.pathname.slice("/jobs/".length);
 			const raw = await env.JOBS.get(jobId);
@@ -102,29 +103,14 @@ export default {
 			return Response.json(JSON.parse(raw));
 		}
 
-		// POST /debug — run synchronously with full transcript (for development)
+		// POST /debug — synchronous with transcript
 		if (request.method === "POST" && url.pathname === "/debug") {
 			const body = (await request.json()) as { prompt?: string };
 			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
 			const projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+			const { agent, files, prefix } = runAgent(body.prompt, projectId, env.OPENROUTER_API_KEY);
 
-			const agent = new Agent({
-				initialState: {
-					systemPrompt: SYSTEM_PROMPT,
-					model: getModel("openrouter", "google/gemini-3-flash-preview"),
-					thinkingLevel: "off",
-					tools: [
-						createR2WriteTool(env.FILES),
-						createR2ReadTool(env.FILES),
-						createR2EditTool(env.FILES),
-						createR2LsTool(env.FILES),
-					],
-				},
-				getApiKey: async () => env.OPENROUTER_API_KEY,
-			});
-
-			// Capture full transcript
 			const transcript: any[] = [];
 			agent.subscribe((e) => {
 				if (e.type === "tool_execution_start") {
@@ -133,29 +119,30 @@ export default {
 					const ev = e as any;
 					const text = ev.result?.content?.[0]?.text ?? "";
 					transcript.push({ event: "tool_result", tool: ev.toolName, isError: ev.isError, result: text.slice(0, 500) });
-				} else if (e.type === "message_end" && (e as any).message?.role === "assistant") {
-					const msg = (e as any).message;
-					const text = msg.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
-					const toolCalls = msg.content?.filter((c: any) => c.type === "toolCall").map((c: any) => ({ name: c.name, args: c.arguments })) ?? [];
-					if (text) transcript.push({ event: "assistant_text", text: text.slice(0, 300) });
-					if (toolCalls.length) transcript.push({ event: "assistant_tool_calls", calls: toolCalls });
 				}
 			});
 
 			await agent.prompt(`Project directory: "${projectId}"\n\n${body.prompt}`);
 
-			return Response.json({ projectId, transcript, error: agent.state.error }, null as any);
+			// Typecheck
+			const tc = typeCheckFromMap(files, prefix);
+
+			return Response.json({
+				projectId,
+				transcript,
+				typeCheck: { success: tc.success, errors: tc.diagnostics.filter((d: any) => d.severity === "error").length },
+				fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length,
+				error: agent.state.error,
+			});
 		}
 
-		// POST /generate — enqueue a new job
+		// POST /generate — enqueue
 		if (request.method === "POST" && url.pathname === "/generate") {
 			const body = (await request.json()) as { prompt?: string };
 			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
 			const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-			const status: JobStatus = { status: "pending", createdAt: Date.now() };
-
-			await env.JOBS.put(jobId, JSON.stringify(status), { expirationTtl: 3600 });
+			await env.JOBS.put(jobId, JSON.stringify({ status: "pending", createdAt: Date.now() } as JobStatus), { expirationTtl: 3600 });
 			await env.CODEGEN_QUEUE.send({ jobId, prompt: body.prompt });
 
 			return Response.json({ jobId, status: "pending" });
@@ -165,17 +152,13 @@ export default {
 			endpoints: {
 				"POST /generate": "{ prompt } → { jobId }",
 				"GET /jobs/:id": "→ { status, downloadUrl?, error? }",
-			},
-			example: {
-				"1. Start": "curl -X POST /generate -d '{\"prompt\": \"URL shortener with D1\"}'",
-				"2. Poll": "curl /jobs/<jobId>",
-				"3. Download": "curl <downloadUrl>",
+				"POST /debug": "{ prompt } → { transcript, typeCheck } (sync, dev only)",
 			},
 		});
 	},
 
 	// ---------------------------------------------------------------------------
-	// Queue consumer (runs the agent — up to 15 min timeout)
+	// Queue consumer
 	// ---------------------------------------------------------------------------
 
 	async queue(batch: MessageBatch<JobMessage>, env: Env): Promise<void> {
@@ -185,30 +168,14 @@ export default {
 			const updateStatus = async (update: Partial<JobStatus>) => {
 				const raw = await env.JOBS.get(jobId);
 				const current: JobStatus = raw ? JSON.parse(raw) : { status: "running", createdAt: Date.now() };
-				const updated = { ...current, ...update };
-				await env.JOBS.put(jobId, JSON.stringify(updated), { expirationTtl: 3600 });
+				await env.JOBS.put(jobId, JSON.stringify({ ...current, ...update }), { expirationTtl: 3600 });
 			};
 
 			try {
 				await updateStatus({ status: "running" });
 
 				const projectId = jobId.replace("job_", "proj_");
-				const prefix = `${projectId}/`;
-
-				const agent = new Agent({
-					initialState: {
-						systemPrompt: SYSTEM_PROMPT,
-						model: getModel("openrouter", "google/gemini-3-flash-preview"),
-						thinkingLevel: "off",
-						tools: [
-							createR2WriteTool(env.FILES),
-							createR2ReadTool(env.FILES),
-							createR2EditTool(env.FILES),
-							createR2LsTool(env.FILES),
-						],
-					},
-					getApiKey: async () => env.OPENROUTER_API_KEY,
-				});
+				const { agent, files, prefix } = runAgent(prompt, projectId, env.OPENROUTER_API_KEY);
 
 				const toolCalls: string[] = [];
 				agent.subscribe((e) => {
@@ -218,30 +185,29 @@ export default {
 				await agent.prompt(`Project directory: "${projectId}"\n\n${prompt}`);
 
 				if (agent.state.error) {
-					await updateStatus({ status: "error", error: agent.state.error, toolCalls });
+					await updateStatus({ status: "error", error: agent.state.error, toolCalls, completedAt: Date.now() });
 					msg.ack();
 					continue;
 				}
 
-				// Typecheck with auto-fix loop
-				let tc = await typeCheckR2Project(env.FILES, prefix);
+				// Typecheck with auto-fix
+				let tc = typeCheckFromMap(files, prefix);
 				let fixes = 0;
 				while (!tc.success && fixes < 2) {
 					fixes++;
 					const errors = tc.diagnostics
-						.filter((d) => d.severity === "error")
-						.map((d) => `${d.file ?? "?"}:${d.line ?? "?"} - ${d.message}`)
+						.filter((d: any) => d.severity === "error")
+						.map((d: any) => `${d.file ?? "?"}:${d.line ?? "?"} - ${d.message}`)
 						.join("\n");
 					await agent.prompt(`TypeScript errors found. Fix them:\n\n${errors}`);
 					if (agent.state.error) break;
-					tc = await typeCheckR2Project(env.FILES, prefix);
+					tc = typeCheckFromMap(files, prefix);
 				}
 
-				// Zip and store
+				// Zip in-memory, write once to R2
 				const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
-				const zipData = await zipProject(env.FILES, prefix);
-				const zipKey = `${prefix}__download.zip`;
-				const downloadPath = await downloads.store(zipKey, zipData, {
+				const zipData = zipFiles(files, prefix);
+				const downloadPath = await downloads.store(`${projectId}.zip`, zipData, {
 					contentType: "application/zip",
 					filename: "project.zip",
 				});
@@ -254,11 +220,7 @@ export default {
 					status: "complete",
 					downloadUrl: downloadPath,
 					summary,
-					typeCheck: {
-						success: tc.success,
-						errors: tc.diagnostics.filter((d) => d.severity === "error").length,
-						fixes,
-					},
+					typeCheck: { success: tc.success, errors: tc.diagnostics.filter((d: any) => d.severity === "error").length, fixes },
 					toolCalls,
 					completedAt: Date.now(),
 				});
