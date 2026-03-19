@@ -11,12 +11,8 @@ import { createMicroAgent, getModel } from "pi-worker";
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import {
 	createFfmpegTool,
-	createExecTool,
 	createUploadTool,
 	createDownloadTool,
-	createSandboxLsTool,
-	createSandboxReadTool,
-	createSandboxWriteTool,
 } from "./sandbox-tools.js";
 
 export { Sandbox } from "@cloudflare/sandbox";
@@ -29,23 +25,16 @@ interface Env {
 
 const SYSTEM_PROMPT = `You are a media processing agent with access to ffmpeg and a full Linux sandbox.
 
-You have two filesystems:
-- **R2 storage** (persistent): Use "ls", "read", "write", "edit" tools. This is where input files live and where outputs should be saved.
-- **Sandbox container** (ephemeral): Use "sandbox_ls", "sandbox_read", "sandbox_write", "exec", "ffmpeg" tools. This is where ffmpeg runs.
+Files are stored in R2. Use "ls", "read", "write", "edit" to manage them.
 
-To transfer files between them:
-- "upload": R2 → sandbox (for processing)
-- "download": sandbox → R2 (to save results)
-
-Workflow for processing media:
+To process media with ffmpeg:
 1. Use "ls" to find the input file in R2
 2. Use "upload" to copy it into the sandbox at /workspace/
-3. Inspect with ffprobe if needed (via "exec")
-4. Run ffmpeg commands to process it
-5. Use "download" to save the output back to R2
+3. Use "ffmpeg" to process it
+4. Use "download" to save the output back to R2
 
 Always use absolute paths in the sandbox (/workspace/).
-Always use ffmpeg -y flag to overwrite output files.`;
+Always use the -y flag in ffmpeg arguments.`;
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -68,15 +57,10 @@ export default {
 		try {
 			const sandbox = getSandbox(env.SANDBOX, sessionId);
 
-			// Create sandbox tools
 			const sandboxTools = [
 				createFfmpegTool(sandbox),
-				createExecTool(sandbox),
 				createUploadTool(sandbox, env.FILES),
 				createDownloadTool(sandbox, env.FILES),
-				createSandboxLsTool(sandbox),
-				createSandboxReadTool(sandbox),
-				createSandboxWriteTool(sandbox),
 			];
 
 			// Build the prompt — include the input file reference if provided
