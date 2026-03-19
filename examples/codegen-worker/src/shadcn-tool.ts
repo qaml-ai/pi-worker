@@ -17,7 +17,8 @@
 
 import { Type, type Static } from "@sinclair/typebox";
 
-const REGISTRY_BASE = "https://ui.shadcn.com/r/styles/radix-mira";
+const REGISTRY_URL = "https://ui.shadcn.com/r/styles";
+const DEFAULT_STYLE = "radix-mira";
 const FETCH_TIMEOUT_MS = 5000;
 
 interface RegistryItem {
@@ -62,10 +63,21 @@ export function createShadcnTool(
 	files: Map<string, string>,
 	options?: ShadcnToolOptions,
 ) {
-	const style = options?.style ?? "new-york";
 	const prefix = options?.prefix ?? "";
 	const componentDir = options?.componentDir ?? "src/components";
-	const registryBase = `https://ui.shadcn.com/r/styles/${style}`;
+
+	// Read style from components.json (written by scaffold) for consistency.
+	// Falls back to options.style or default.
+	function getRegistryBase(): string {
+		const componentsJson = files.get(`${prefix}components.json`);
+		if (componentsJson) {
+			try {
+				const config = JSON.parse(componentsJson);
+				if (config.style) return `${REGISTRY_URL}/${config.style}`;
+			} catch {}
+		}
+		return `${REGISTRY_URL}/${options?.style ?? DEFAULT_STYLE}`;
+	}
 
 	return {
 		name: "add_component" as const,
@@ -91,15 +103,16 @@ export function createShadcnTool(
 				visited.add(name);
 
 				try {
-					const item = await fetchComponent(registryBase, name);
+					const item = await fetchComponent(getRegistryBase(), name);
 					if (!item) {
 						failed.push(name);
 						continue;
 					}
 
-					// Write component files (fix registry import paths)
+					// Write component files (strip registry style prefix from paths)
 					for (const file of item.files) {
-						const filePath = `${prefix}${componentDir}/${file.path}`;
+						const cleanPath = file.path.replace(/^registry\/[^/]+\//, "");
+						const filePath = `${prefix}${componentDir}/${cleanPath}`;
 						const content = file.content
 							.replace(/@\/registry\/[^/]+\/lib\//g, "@/lib/")
 							.replace(/@\/registry\/[^/]+\/ui\//g, "@/components/ui/")

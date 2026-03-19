@@ -37,10 +37,11 @@ describe("createShadcnTool", () => {
 		]);
 		const tool = createShadcnTool(files);
 
-		await tool.execute("test", { components: ["dialog"] });
+		// sonner has known npm deps (sonner, next-themes)
+		await tool.execute("test", { components: ["sonner"] });
 
 		const pkg = JSON.parse(files.get("package.json")!);
-		expect(pkg.dependencies["@radix-ui/react-dialog"]).toBeDefined();
+		expect(pkg.dependencies["sonner"]).toBeDefined();
 	}, 15000);
 
 	it("creates cn() utility", async () => {
@@ -64,6 +65,30 @@ describe("createShadcnTool", () => {
 
 		expect(files.has("proj_123/src/components/ui/button.tsx")).toBe(true);
 		expect(files.has("proj_123/src/lib/utils.ts")).toBe(true);
+	}, 15000);
+
+	it("reads style from components.json", async () => {
+		const files = new Map<string, string>();
+		// Simulate scaffold writing components.json with nova style
+		files.set("components.json", JSON.stringify({ style: "radix-nova" }));
+		const tool = createShadcnTool(files);
+
+		await tool.execute("test", { components: ["button"] });
+
+		const button = files.get("src/components/ui/button.tsx")!;
+		expect(button).toBeDefined();
+		// nova style exists and returns a valid component
+		expect(button).toContain("React");
+	}, 15000);
+
+	it("reads style from prefixed components.json", async () => {
+		const files = new Map<string, string>();
+		files.set("proj/components.json", JSON.stringify({ style: "radix-mira" }));
+		const tool = createShadcnTool(files, { prefix: "proj/" });
+
+		await tool.execute("test", { components: ["button"] });
+
+		expect(files.has("proj/src/components/ui/button.tsx")).toBe(true);
 	}, 15000);
 
 	it("handles missing components gracefully", async () => {
