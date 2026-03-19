@@ -4,3 +4,5 @@ dist/
 .dev.vars
 *.log
 bun.lock
+.dev.vars.swp
+*.swp
