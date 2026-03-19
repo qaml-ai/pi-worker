@@ -12,7 +12,7 @@ import {
 } from "pi-worker";
 
 interface Env {
-	ANTHROPIC_API_KEY: string;
+	OPENROUTER_API_KEY: string;
 	FILES: R2Bucket;
 }
 
@@ -28,7 +28,7 @@ export default {
 		const agent = new Agent({
 			initialState: {
 				systemPrompt: "You are a helpful coding assistant. Use the file tools to manage files in storage.",
-				model: getModel("anthropic", "claude-sonnet-4-20250514"),
+				model: getModel("openrouter", "google/gemini-3-flash-preview"),
 				thinkingLevel: "off",
 				tools: [
 					createR2ReadTool(env.FILES),
@@ -37,7 +37,7 @@ export default {
 					createR2LsTool(env.FILES),
 				],
 			},
-			getApiKey: async () => env.ANTHROPIC_API_KEY,
+			getApiKey: async () => env.OPENROUTER_API_KEY,
 		});
 
 		await agent.prompt(prompt);

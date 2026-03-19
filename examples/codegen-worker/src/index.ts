@@ -21,7 +21,7 @@ import { zipSync, strToU8 } from "fflate";
 import { typeCheckR2Project } from "./typecheck.js";
 
 interface Env {
-	ANTHROPIC_API_KEY: string;
+	OPENROUTER_API_KEY: string;
 	DOWNLOAD_SECRET: string;
 	FILES: R2Bucket;
 	JOBS: KVNamespace;
@@ -102,6 +102,51 @@ export default {
 			return Response.json(JSON.parse(raw));
 		}
 
+		// POST /debug — run synchronously with full transcript (for development)
+		if (request.method === "POST" && url.pathname === "/debug") {
+			const body = (await request.json()) as { prompt?: string };
+			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
+
+			const projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+			const agent = new Agent({
+				initialState: {
+					systemPrompt: SYSTEM_PROMPT,
+					model: getModel("openrouter", "google/gemini-3-flash-preview"),
+					thinkingLevel: "off",
+					tools: [
+						createR2WriteTool(env.FILES),
+						createR2ReadTool(env.FILES),
+						createR2EditTool(env.FILES),
+						createR2LsTool(env.FILES),
+					],
+				},
+				getApiKey: async () => env.OPENROUTER_API_KEY,
+			});
+
+			// Capture full transcript
+			const transcript: any[] = [];
+			agent.subscribe((e) => {
+				if (e.type === "tool_execution_start") {
+					transcript.push({ event: "tool_call", tool: (e as any).toolName, args: (e as any).args });
+				} else if (e.type === "tool_execution_end") {
+					const ev = e as any;
+					const text = ev.result?.content?.[0]?.text ?? "";
+					transcript.push({ event: "tool_result", tool: ev.toolName, isError: ev.isError, result: text.slice(0, 500) });
+				} else if (e.type === "message_end" && (e as any).message?.role === "assistant") {
+					const msg = (e as any).message;
+					const text = msg.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
+					const toolCalls = msg.content?.filter((c: any) => c.type === "toolCall").map((c: any) => ({ name: c.name, args: c.arguments })) ?? [];
+					if (text) transcript.push({ event: "assistant_text", text: text.slice(0, 300) });
+					if (toolCalls.length) transcript.push({ event: "assistant_tool_calls", calls: toolCalls });
+				}
+			});
+
+			await agent.prompt(`Project directory: "${projectId}"\n\n${body.prompt}`);
+
+			return Response.json({ projectId, transcript, error: agent.state.error }, null as any);
+		}
+
 		// POST /generate — enqueue a new job
 		if (request.method === "POST" && url.pathname === "/generate") {
 			const body = (await request.json()) as { prompt?: string };
@@ -153,7 +198,7 @@ export default {
 				const agent = new Agent({
 					initialState: {
 						systemPrompt: SYSTEM_PROMPT,
-						model: getModel("anthropic", "claude-sonnet-4-20250514"),
+						model: getModel("openrouter", "google/gemini-3-flash-preview"),
 						thinkingLevel: "off",
 						tools: [
 							createR2WriteTool(env.FILES),
@@ -162,7 +207,7 @@ export default {
 							createR2LsTool(env.FILES),
 						],
 					},
-					getApiKey: async () => env.ANTHROPIC_API_KEY,
+					getApiKey: async () => env.OPENROUTER_API_KEY,
 				});
 
 				const toolCalls: string[] = [];
