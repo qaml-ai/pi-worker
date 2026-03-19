@@ -3,6 +3,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Replace ajv validation with a noop — ajv.compile() uses new Function()
+  // which is blocked in Workers. Remove once badlogic/pi-mono#2396 is merged.
+  "alias": {
+    "@mariozechner/pi-ai/dist/utils/validation.js": "pi-worker/dist/validation-noop.js"
+  },
   "r2_buckets": [
     {
       "binding": "FILES",
