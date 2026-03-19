@@ -125,7 +125,7 @@ export default {
 			await agent.prompt(`Project directory: "${projectId}"\n\n${body.prompt}`);
 
 			// Typecheck
-			const tc = typeCheckFromMap(files, prefix);
+			const tc = await typeCheckFromMap(files, prefix);
 
 			return Response.json({
 				projectId,
@@ -191,7 +191,7 @@ export default {
 				}
 
 				// Typecheck with auto-fix
-				let tc = typeCheckFromMap(files, prefix);
+				let tc = await typeCheckFromMap(files, prefix);
 				let fixes = 0;
 				while (!tc.success && fixes < 2) {
 					fixes++;
@@ -201,7 +201,7 @@ export default {
 						.join("\n");
 					await agent.prompt(`TypeScript errors found. Fix them:\n\n${errors}`);
 					if (agent.state.error) break;
-					tc = typeCheckFromMap(files, prefix);
+					tc = await typeCheckFromMap(files, prefix);
 				}
 
 				// Zip in-memory, write once to R2
