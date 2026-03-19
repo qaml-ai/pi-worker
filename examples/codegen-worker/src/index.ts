@@ -20,6 +20,8 @@ import { zipSync, strToU8 } from "fflate";
 // Dynamic import — avoid loading the 9MB TS compiler at Worker startup
 // This way the queue consumer doesn't OOM before processing messages
 const loadTypeChecker = () => import("./typecheck-mem.js").then((m) => m.typeCheckFromMap);
+import { scaffoldProject, type ScaffoldOptions } from "./scaffold.js";
+import { createShadcnTool } from "./shadcn-tool.js";
 
 interface Env {
 	OPENROUTER_API_KEY: string;
@@ -45,17 +47,36 @@ interface JobStatus {
 	completedAt?: number;
 }
 
-const SYSTEM_PROMPT = `You are a Cloudflare Worker codebase generator. When the user describes an app, create a complete, production-ready multi-file project.
+const SYSTEM_PROMPT = `You are a Cloudflare Worker app builder. The project is already scaffolded with:
+- React Router 7 (SSR framework mode)
+- React 19
+- Tailwind CSS v4 with themed CSS variables (OKLch colors, light/dark mode)
+- shadcn/ui (radix-mira style) — use add_component to install components
+- Cloudflare Workers deployment
+- Vite bundler
+
+The project structure is pre-created:
+  package.json, tsconfig.json, wrangler.jsonc, components.json, postcss.config.mjs
+  vite.config.ts, react-router.config.ts
+  app/app.css (themed), app/root.tsx, app/routes.ts, app/routes/home.tsx
+  app/lib/utils.ts (cn utility)
+  workers/app.ts (worker entry)
+
+YOUR JOB: Customize this project based on the user's request.
 
 RULES:
-1. All file paths MUST be prefixed with the project directory you are given (e.g. "proj_abc/src/index.ts")
-2. You CAN and SHOULD create files in subdirectories — use paths like "proj_abc/src/handlers/users.ts"
-3. Always create at minimum: package.json, wrangler.jsonc, tsconfig.json, src/index.ts
-4. Use TypeScript, ES modules, and Cloudflare Workers best practices
-5. Include bindings (KV, R2, D1, Durable Objects) in wrangler.jsonc if needed
-6. Split code across multiple files — put types, handlers, utilities in separate files under src/
-7. Do NOT include node_modules, lock files, or .git
-8. After creating all files, use ls to confirm the structure`;
+1. All file paths MUST be prefixed with the project directory you are given
+2. Use add_component to install shadcn components (e.g. add_component(["button", "card", "dialog"]))
+3. Edit existing files with the edit tool — don't recreate files that already exist
+4. Add new routes in app/routes/ and register them in app/routes.ts
+5. Use React Router patterns: loaders for data, actions for mutations, <Form> for forms
+6. Put shared types in app/types.ts, utilities in app/lib/
+7. For data persistence, add D1/KV/R2 bindings to wrangler.jsonc and Durable Objects if needed
+8. After making changes, use ls to confirm the structure`;
+
+function projectName(projectId: string): string {
+	return projectId.replace(/^proj_\d+_/, "app-");
+}
 
 function zipFiles(files: Map<string, string>, prefix: string): Uint8Array {
 	const entries: Record<string, Uint8Array> = {};
@@ -68,16 +89,20 @@ function zipFiles(files: Map<string, string>, prefix: string): Uint8Array {
 	return zipSync(entries, { level: 6 });
 }
 
-function runAgent(prompt: string, projectId: string, apiKey: string, modelId?: string) {
+async function runAgent(prompt: string, projectId: string, apiKey: string, modelId?: string, scaffoldOpts?: ScaffoldOptions) {
 	const files = new Map<string, string>();
 	const prefix = `${projectId}/`;
+
+	// Scaffold the project before the agent starts — agent gets a pre-configured
+	// React Router 7 + shadcn/ui + Tailwind v4 project to customize
+	await scaffoldProject(files, prefix, projectName(projectId), scaffoldOpts);
 
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: SYSTEM_PROMPT,
 			model: getModel("openrouter", (modelId || "google/gemini-3-flash-preview") as any),
 			thinkingLevel: "off",
-			tools: createMemoryTools(files),
+			tools: [...createMemoryTools(files), createShadcnTool(files, { prefix })],
 		},
 		getApiKey: async () => apiKey,
 	});
@@ -111,7 +136,7 @@ export default {
 			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
 			const projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-			const { agent, files, prefix } = runAgent(body.prompt, projectId, env.OPENROUTER_API_KEY, body.model);
+			const { agent, files, prefix } = await runAgent(body.prompt, projectId, env.OPENROUTER_API_KEY, body.model);
 
 			const transcript: any[] = [];
 			agent.subscribe((e) => {
@@ -177,7 +202,7 @@ export default {
 				await updateStatus({ status: "running" });
 
 				const projectId = jobId.replace("job_", "proj_");
-				const { agent, files, prefix } = runAgent(prompt, projectId, env.OPENROUTER_API_KEY);
+				const { agent, files, prefix } = await runAgent(prompt, projectId, env.OPENROUTER_API_KEY);
 
 				const toolCalls: string[] = [];
 				agent.subscribe((e) => {
