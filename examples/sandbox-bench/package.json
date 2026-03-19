@@ -1,0 +1,16 @@
+{
+  "name": "sandbox-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.7.18"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250313.0",
+    "wrangler": "^4.0.0"
+  }
+}
