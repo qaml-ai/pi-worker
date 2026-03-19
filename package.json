@@ -1,0 +1,5 @@
+{
+  "name": "pi-worker-agents",
+  "private": true,
+  "workspaces": ["packages/*", "examples/*"]
+}
