@@ -1,8 +1,8 @@
 /**
- * FFmpeg Agent — pi-mono agent with R2 file tools + code execution.
+ * FFmpeg Agent — pi-mono agent with R2-mounted sandbox.
  *
- * The agent writes JavaScript that calls ffmpeg()/ffprobe() helpers.
- * Code runs in a Dynamic Worker Loader. Helpers proxy to a Sandbox container.
+ * R2 is mounted directly into the sandbox at /data. ffmpeg reads input
+ * and writes output there — no file transfer through the Worker.
  */
 
 import {
@@ -25,12 +25,15 @@ interface Env {
 	SANDBOX: DurableObjectNamespace<Sandbox>;
 	LOADER: any;
 	FILES: R2Bucket;
+	R2_ACCESS_KEY_ID: string;
+	R2_SECRET_ACCESS_KEY: string;
+	R2_ENDPOINT: string; // https://<ACCOUNT_ID>.r2.cloudflarestorage.com
 }
 
 function createFfmpegHelpers(sandbox: ReturnType<typeof getSandbox>) {
 	return {
 		async ffmpeg(args: string) {
-			await sandbox.mkdir("/workspace/output", { recursive: true });
+			await sandbox.mkdir("/data/output", { recursive: true });
 			const r = await sandbox.exec(`ffmpeg -y ${args}`, { timeout: 120_000 });
 			return r.success
 				? { success: true, stderr: r.stderr.slice(-1000) }
@@ -46,34 +49,36 @@ function createFfmpegHelpers(sandbox: ReturnType<typeof getSandbox>) {
 				: { success: false, error: r.stderr.slice(-1000) };
 		},
 		async listOutputs() {
-			const r = await sandbox.exec("ls -la /workspace/output/ 2>/dev/null || echo '(empty)'");
+			const r = await sandbox.exec("ls -la /data/output/ 2>/dev/null || echo '(empty)'");
 			return r.stdout;
 		},
 	};
 }
 
-const SYSTEM_PROMPT = `You are a media processing agent with ffmpeg and a file system.
+const SYSTEM_PROMPT = `You are a media processing agent with ffmpeg.
 
 Tools:
-- read, write, edit, ls: manage files in R2 storage
+- read, write, edit, ls: manage files in R2 storage (paths like "input/video.mp4")
 - execute: run JavaScript code with ffmpeg helpers
 
+The R2 bucket is mounted at /data in the sandbox. Files you write to R2
+are immediately available to ffmpeg at /data/<path>, and ffmpeg outputs
+written to /data/ are immediately in R2.
+
 The "execute" tool runs code with these helpers:
-  await ffmpeg("-i /workspace/input.mp4 -vf scale=480:-1 /workspace/output/out.gif")
-  await ffprobe("/workspace/input.mp4")
+  await ffmpeg("-i /data/input/video.mp4 -vf scale=480:-1 /data/output/out.gif")
+  await ffprobe("/data/input/video.mp4")
   await listOutputs()
 
-Input files uploaded by the user are at /workspace/<filename>.
-You can pass URLs directly to ffmpeg: ffmpeg("-i https://example.com/video.mp4 ...")
-Always write outputs to /workspace/output/. Always use -y flag.
+You can also pass URLs directly to ffmpeg:
+  await ffmpeg("-i https://example.com/video.mp4 /data/output/out.mp4")
 
-You can write scripts to R2, iterate with edit, then run them with execute({ file: "path" }).`;
+Always write outputs to /data/output/. Always use -y flag.`;
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
 
-		// Serve signed download links
 		const served = await downloads.serve(request);
 		if (served) return served;
 
@@ -96,14 +101,22 @@ export default {
 		const sandbox = getSandbox(env.SANDBOX, sessionId);
 
 		try {
-			// Upload input files to sandbox
+			// Mount R2 bucket at /data, scoped to this session's prefix
+			await sandbox.mountBucket("ffmpeg-agent-files", "/data", {
+				endpoint: env.R2_ENDPOINT,
+				prefix: `/${sessionId}/`,
+				credentials: {
+					accessKeyId: env.R2_ACCESS_KEY_ID,
+					secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+				},
+			});
+
+			// Upload input files to R2 under session prefix — they appear at /data/input/ in sandbox
 			const fileNames: string[] = [];
 			if (files.length > 0) {
-				await sandbox.mkdir("/workspace", { recursive: true });
 				for (const file of files) {
-					const buf = await file.arrayBuffer();
-					const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-					await sandbox.writeFile(`/workspace/${file.name}`, base64, { encoding: "base64" });
+					const key = `${sessionId}/input/${file.name}`;
+					await env.FILES.put(key, await file.arrayBuffer());
 					fileNames.push(file.name);
 				}
 			}
@@ -130,36 +143,24 @@ export default {
 			});
 
 			const userPrompt = files.length > 0
-				? `Input files at /workspace/: ${fileNames.join(", ")}\n\n${prompt}`
+				? `Input files in R2 at input/: ${fileNames.join(", ")} (available in sandbox at /data/input/)\n\n${prompt}`
 				: prompt;
 
 			await agent.prompt(userPrompt);
 
-			// Collect outputs → store in R2 → return signed URLs
-			const lsResult = await sandbox.exec("ls /workspace/output/ 2>/dev/null");
-			const outputNames = lsResult.stdout.trim().split("\n").filter(Boolean);
+			// Output files are already in R2 under sessionId/output/ — just sign them
+			const listed = await env.FILES.list({ prefix: `${sessionId}/output/` });
 			const response = lastText(agent);
 
-			if (outputNames.length === 0) {
+			if (listed.objects.length === 0) {
 				return Response.json({ response, toolCalls, error: agent.state.error });
 			}
 
-			const mimeTypes: Record<string, string> = {
-				mp4: "video/mp4", webm: "video/webm", gif: "image/gif",
-				png: "image/png", jpg: "image/jpeg", mp3: "audio/mpeg",
-				wav: "audio/wav", ogg: "audio/ogg", aac: "audio/aac",
-			};
-
 			const outputUrls: Record<string, string> = {};
-			for (const name of outputNames) {
-				const f = await sandbox.readFile(`/workspace/output/${name}`, { encoding: "base64" });
-				const bin = Uint8Array.from(atob(f.content), (c) => c.charCodeAt(0));
-				const ext = name.split(".").pop() || "bin";
-				const key = `${sessionId}/${name}`;
-				const path = await downloads.store(key, bin, {
-					contentType: mimeTypes[ext] || "application/octet-stream",
-					filename: name,
-				});
+			for (const obj of listed.objects) {
+				const name = obj.key.replace(`${sessionId}/output/`, "");
+				if (!name) continue;
+				const path = await downloads.sign(obj.key);
 				outputUrls[name] = new URL(path, request.url).href;
 			}
 

@@ -31,11 +31,6 @@ export interface StoreOptions {
 export interface DownloadHandler {
 	/**
 	 * Store a file in R2 and return a signed download URL.
-	 *
-	 * @param key - R2 key to store under
-	 * @param data - File content (string, ArrayBuffer, Uint8Array, or ReadableStream)
-	 * @param options - Content type, filename, TTL
-	 * @returns Signed URL string
 	 */
 	store: (
 		key: string,
@@ -44,14 +39,14 @@ export interface DownloadHandler {
 	) => Promise<string>;
 
 	/**
+	 * Generate a signed download URL for a key that already exists in R2.
+	 * Does not write anything — just signs.
+	 */
+	sign: (key: string, options?: StoreOptions) => Promise<string>;
+
+	/**
 	 * Handle an incoming request. If it's a valid signed download request,
 	 * returns the file as a Response. Otherwise returns null.
-	 *
-	 * Call this first in your fetch handler:
-	 * ```ts
-	 * const served = await downloads.serve(request);
-	 * if (served) return served;
-	 * ```
 	 */
 	serve: (request: Request) => Promise<Response | null>;
 }
@@ -105,6 +100,13 @@ export function createDownloadHandler(
 		return `${basePath}${encodeURIComponent(key)}?expires=${expires}&sig=${sig}`;
 	};
 
+	const sign = async (key: string, options?: StoreOptions): Promise<string> => {
+		const ttl = options?.ttl ?? DEFAULT_TTL_SECONDS;
+		const expires = Date.now() + ttl * 1000;
+		const sig = await hmac(secret, `${key}:${expires}`);
+		return `${basePath}${encodeURIComponent(key)}?expires=${expires}&sig=${sig}`;
+	};
+
 	const serve = async (request: Request): Promise<Response | null> => {
 		if (request.method !== "GET") return null;
 
@@ -141,5 +143,5 @@ export function createDownloadHandler(
 		});
 	};
 
-	return { store, serve };
+	return { store, sign, serve };
 }
