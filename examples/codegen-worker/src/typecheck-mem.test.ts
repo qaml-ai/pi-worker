@@ -101,6 +101,29 @@ describe("typeCheckFromMap", () => {
 		expect(moduleErrors).toHaveLength(0);
 	}, 15000);
 
+	it("resolves deep internal types (Hono Context)", async () => {
+		const files = new Map([
+			["proj/package.json", '{"dependencies":{"hono":"^4.0.0"}}'],
+			["proj/src/index.ts", `
+import { Hono } from "hono";
+import type { Context } from "hono";
+
+const app = new Hono();
+app.get("/", (c: Context) => c.json({ ok: true }));
+export default app;
+`],
+		]);
+		const result = await typeCheckFromMap(files, "proj/");
+		console.log("deep types diagnostics:", result.diagnostics.map((d) => `${d.file}:${d.line} ${d.message}`));
+		console.log("typesFetched:", (result as any).typesFetched);
+		// The fetched types are inside the typecheck files map, not the outer map.
+		// We can tell it worked because Context resolved (0 "Cannot find" errors).
+		const moduleErrors = result.diagnostics.filter(
+			(d) => d.severity === "error" && d.message.includes("Cannot find")
+		);
+		expect(moduleErrors).toHaveLength(0);
+	}, 30000);
+
 	it("skips unknown deps without errors", async () => {
 		const files = new Map([
 			["proj/package.json", '{"dependencies":{"nonexistent-pkg-xyz":"^1.0.0"}}'],

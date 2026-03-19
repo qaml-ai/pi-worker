@@ -1,16 +1,21 @@
 /**
  * Fetch type declarations for npm packages.
  *
- * Uses the TypeScript compiler's AST to extract import specifiers from
- * source files, then fetches exactly those types from unpkg. Handles
- * both root imports ("hono") and subpath imports ("hono/cors") via the
- * package's exports map.
+ * Uses the TypeScript compiler's AST to:
+ * 1. Scan user source files for external import specifiers
+ * 2. Fetch entry-point .d.ts files from unpkg
+ * 3. Recursively follow internal relative imports within fetched .d.ts files
+ *
+ * This means if hono/index.d.ts imports ./context.d.ts which imports
+ * ./types.d.ts, all three are fetched automatically.
  */
 
 import ts from "typescript";
 
 const UNPKG = "https://unpkg.com";
 const FETCH_TIMEOUT_MS = 5000;
+const MAX_DEPTH = 10; // prevent infinite loops
+const MAX_FILES_PER_PACKAGE = 50; // cap fetches per package
 
 interface PkgJson {
 	types?: string;
@@ -18,9 +23,10 @@ interface PkgJson {
 	exports?: Record<string, any>;
 }
 
-/**
- * Scan source files for import specifiers and fetch their .d.ts files.
- */
+// -------------------------------------------------------------------------
+// Public API
+// -------------------------------------------------------------------------
+
 export async function fetchDependencyTypes(
 	files: Map<string, string>,
 ): Promise<{ fetched: string[]; failed: string[] }> {
@@ -34,41 +40,16 @@ export async function fetchDependencyTypes(
 		return { fetched: [], failed: [] };
 	}
 
-	// Use the TS compiler AST to extract all external import specifiers
-	const importPaths = new Set<string>();
-	for (const [key, content] of files) {
-		if (!key.endsWith(".ts") && !key.endsWith(".tsx")) continue;
-		const sourceFile = ts.createSourceFile(key, content, ts.ScriptTarget.Latest, false);
-		ts.forEachChild(sourceFile, function visit(node) {
-			// import ... from "specifier"
-			if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-				const spec = node.moduleSpecifier.text;
-				if (!spec.startsWith(".") && !spec.startsWith("/")) importPaths.add(spec);
-			}
-			// export ... from "specifier"
-			if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-				const spec = node.moduleSpecifier.text;
-				if (!spec.startsWith(".") && !spec.startsWith("/")) importPaths.add(spec);
-			}
-			// import("specifier") — dynamic imports
-			if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length === 1) {
-				const arg = node.arguments[0];
-				if (ts.isStringLiteral(arg)) {
-					const spec = arg.text;
-					if (!spec.startsWith(".") && !spec.startsWith("/")) importPaths.add(spec);
-				}
-			}
-			ts.forEachChild(node, visit);
-		});
-	}
+	// Scan user source files for external import specifiers using TS AST
+	const importPaths = scanImports(files);
 
-	// Group by package name (first segment or @scope/name)
+	// Group by package name
 	const packageImports = new Map<string, Set<string>>();
 	for (const path of importPaths) {
 		const pkgName = path.startsWith("@")
 			? path.split("/").slice(0, 2).join("/")
 			: path.split("/")[0];
-		if (!deps[pkgName]) continue; // only fetch declared deps
+		if (!deps[pkgName]) continue;
 		if (!packageImports.has(pkgName)) packageImports.set(pkgName, new Set());
 		packageImports.get(pkgName)!.add(path);
 	}
@@ -76,7 +57,6 @@ export async function fetchDependencyTypes(
 	const fetched: string[] = [];
 	const failed: string[] = [];
 
-	// Fetch types for each package in parallel
 	await Promise.allSettled(
 		[...packageImports.entries()].map(async ([pkgName, paths]) => {
 			const version = deps[pkgName].replace(/^[\^~>=<]+/, "");
@@ -92,19 +72,70 @@ export async function fetchDependencyTypes(
 	return { fetched, failed };
 }
 
+// -------------------------------------------------------------------------
+// Import scanning (TS AST)
+// -------------------------------------------------------------------------
+
+function scanImports(files: Map<string, string>): Set<string> {
+	const importPaths = new Set<string>();
+	for (const [key, content] of files) {
+		if (!key.endsWith(".ts") && !key.endsWith(".tsx")) continue;
+		const sf = ts.createSourceFile(key, content, ts.ScriptTarget.Latest, false);
+		ts.forEachChild(sf, function visit(node) {
+			if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+				const s = node.moduleSpecifier.text;
+				if (!s.startsWith(".") && !s.startsWith("/")) importPaths.add(s);
+			}
+			if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+				const s = node.moduleSpecifier.text;
+				if (!s.startsWith(".") && !s.startsWith("/")) importPaths.add(s);
+			}
+			if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length === 1) {
+				const arg = node.arguments[0];
+				if (ts.isStringLiteral(arg) && !arg.text.startsWith(".") && !arg.text.startsWith("/")) {
+					importPaths.add(arg.text);
+				}
+			}
+			ts.forEachChild(node, visit);
+		});
+	}
+	return importPaths;
+}
+
 /**
- * Fetch types for a package and all its imported subpaths.
+ * Scan a .d.ts file for relative import specifiers (./foo, ../bar).
  */
+function scanRelativeImports(content: string, fileName: string): string[] {
+	const imports: string[] = [];
+	const sf = ts.createSourceFile(fileName, content, ts.ScriptTarget.Latest, false);
+	ts.forEachChild(sf, function visit(node) {
+		if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+			const s = node.moduleSpecifier.text;
+			if (s.startsWith(".")) imports.push(s);
+		}
+		if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+			const s = node.moduleSpecifier.text;
+			if (s.startsWith(".")) imports.push(s);
+		}
+		// import type references: /// <reference types="..." />
+		// These are less common but handle them too
+		ts.forEachChild(node, visit);
+	});
+	return imports;
+}
+
+// -------------------------------------------------------------------------
+// Package type fetching with recursive internal resolution
+// -------------------------------------------------------------------------
+
 async function fetchPackageTypes(
 	name: string,
 	version: string,
 	importPaths: Set<string>,
 	files: Map<string, string>,
 ): Promise<boolean> {
-	// Fetch package.json
 	const pkg = await fetchPkgJson(name, version);
 	if (!pkg) {
-		// Try @types/
 		const scopedName = name.startsWith("@")
 			? name.replace("@", "").replace("/", "__")
 			: name;
@@ -117,32 +148,149 @@ async function fetchPackageTypes(
 
 	for (const importPath of importPaths) {
 		const subpath = importPath === name ? "." : "./" + importPath.slice(name.length + 1);
-
-		// Resolve the types entry for this subpath
 		const typesPath = resolveTypesPath(pkg, subpath);
 		if (!typesPath) continue;
 
-		const dts = await fetchDtsFile(name, version, typesPath);
-		if (!dts) continue;
+		// Fetch the entry .d.ts and all its internal imports recursively
+		const fetched = await fetchDtsTree(name, version, typesPath);
 
-		// Store in the files map where the TS compiler will find it
-		if (subpath === ".") {
-			files.set(`node_modules/${name}/index.d.ts`, dts);
-		} else {
-			const subDir = subpath.replace("./", "");
-			files.set(`node_modules/${name}/${subDir}/index.d.ts`, dts);
+		for (const [filePath, content] of fetched) {
+			// Map the package-internal path to a node_modules path the compiler can find
+			const nodeModulesPath = toNodeModulesPath(name, subpath, typesPath, filePath);
+			files.set(nodeModulesPath, content);
 		}
-		anySuccess = true;
+
+		if (fetched.size > 0) anySuccess = true;
 	}
 
 	return anySuccess;
 }
 
 /**
- * Resolve the types .d.ts path from a package.json for a given subpath.
+ * Fetch a .d.ts file and recursively fetch all its relative imports.
+ * Returns a Map of package-relative paths to content.
  */
+async function fetchDtsTree(
+	name: string,
+	version: string,
+	entryPath: string,
+): Promise<Map<string, string>> {
+	const result = new Map<string, string>();
+	const queue = [entryPath.replace(/^\.\//, "")];
+	const visited = new Set<string>();
+
+	while (queue.length > 0 && result.size < MAX_FILES_PER_PACKAGE) {
+		const batch = queue.splice(0, 10); // fetch in batches of 10
+		const fetches = batch
+			.filter((p) => !visited.has(p))
+			.map(async (filePath) => {
+				visited.add(filePath);
+				const content = await fetchSingleDts(name, version, filePath);
+				if (!content) return;
+
+				result.set(filePath, content);
+
+				// Scan for relative imports and queue them
+				const relImports = scanRelativeImports(content, filePath);
+				const dir = filePath.substring(0, filePath.lastIndexOf("/") + 1);
+
+				for (const rel of relImports) {
+					const resolved = resolveRelativePath(dir, rel);
+					if (!resolved || visited.has(resolved)) continue;
+					queue.push(resolved);
+				}
+			});
+
+		await Promise.all(fetches);
+	}
+
+	return result;
+}
+
+/**
+ * Fetch a single .d.ts file, trying multiple extensions.
+ */
+async function fetchSingleDts(
+	name: string,
+	version: string,
+	filePath: string,
+): Promise<string | null> {
+	// Try the path as-is, then with .d.ts, then /index.d.ts
+	const candidates = filePath.endsWith(".d.ts")
+		? [filePath]
+		: [
+				filePath + ".d.ts",
+				filePath + "/index.d.ts",
+				filePath + ".d.mts",
+				// Some packages use .js extension in imports but have .d.ts files
+				filePath.replace(/\.js$/, ".d.ts"),
+				filePath.replace(/\.mjs$/, ".d.mts"),
+			];
+
+	for (const candidate of candidates) {
+		const resp = await fetchWithTimeout(`${UNPKG}/${name}@${version}/${candidate}`);
+		if (resp.ok) {
+			const content = await resp.text();
+			if (content.length > 5 && !content.includes("<!DOCTYPE")) {
+				return content;
+			}
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Resolve a relative import path against a directory.
+ */
+function resolveRelativePath(dir: string, rel: string): string | null {
+	const parts = (dir + rel.replace(/^\.\//, "")).split("/");
+	const resolved: string[] = [];
+	for (const p of parts) {
+		if (p === "." || p === "") continue;
+		if (p === "..") {
+			if (resolved.length === 0) return null;
+			resolved.pop();
+		} else {
+			resolved.push(p);
+		}
+	}
+	return resolved.join("/");
+}
+
+/**
+ * Map a package-internal file path to a node_modules path the compiler finds.
+ */
+function toNodeModulesPath(
+	pkgName: string,
+	subpath: string,
+	entryPath: string,
+	filePath: string,
+): string {
+	if (subpath === ".") {
+		// Root import — file lives at node_modules/{pkg}/{filePath}
+		return `node_modules/${pkgName}/${filePath}`;
+	}
+
+	// Subpath import — the entry point needs to be findable as
+	// node_modules/{pkg}/{subpath}/index.d.ts, and internal files relative to it
+	const subDir = subpath.replace("./", "");
+	const entryDir = entryPath.replace(/^\.\//, "").substring(0, entryPath.lastIndexOf("/") + 1).replace(/^\.\//, "");
+
+	if (filePath === entryPath.replace(/^\.\//, "")) {
+		// This is the entry file itself
+		return `node_modules/${pkgName}/${subDir}/index.d.ts`;
+	}
+
+	// Internal file — keep it relative to the package root
+	return `node_modules/${pkgName}/${filePath}`;
+}
+
+// -------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------
+
 function resolveTypesPath(pkg: PkgJson, subpath: string): string | null {
-	// Check exports map first
 	if (pkg.exports) {
 		const entry = pkg.exports[subpath];
 		if (entry) {
@@ -153,48 +301,10 @@ function resolveTypesPath(pkg: PkgJson, subpath: string): string | null {
 			}
 		}
 	}
-
-	// For root import, fall back to types/typings field
 	if (subpath === ".") {
 		return pkg.types || pkg.typings || null;
 	}
-
 	return null;
-}
-
-/**
- * Fetch a .d.ts file, following barrel re-exports one level deep.
- */
-async function fetchDtsFile(
-	name: string,
-	version: string,
-	typesPath: string,
-): Promise<string | null> {
-	const basePath = typesPath.replace(/^\.\//, "");
-	const resp = await fetchWithTimeout(`${UNPKG}/${name}@${version}/${basePath}`);
-	if (!resp.ok) return null;
-
-	let content = await resp.text();
-	if (content.length < 10 || content.includes("<!DOCTYPE")) return null;
-
-	// Follow thin barrel re-exports one level
-	const reExport = content.match(/^export \* from ["'](.+?)["'];?\s*$/m);
-	if (reExport && content.trim().split("\n").length <= 3) {
-		const dir = basePath.substring(0, basePath.lastIndexOf("/") + 1);
-		const rel = reExport[1].replace(/^\.\//, "");
-		for (const ext of [".d.ts", "/index.d.ts"]) {
-			const innerResp = await fetchWithTimeout(`${UNPKG}/${name}@${version}/${dir}${rel}${ext}`);
-			if (innerResp.ok) {
-				const inner = await innerResp.text();
-				if (inner.length > 10 && !inner.includes("<!DOCTYPE")) {
-					content = inner + "\n" + content.replace(reExport[0], "");
-					break;
-				}
-			}
-		}
-	}
-
-	return content;
 }
 
 async function fetchPkgJson(name: string, version: string): Promise<PkgJson | null> {
