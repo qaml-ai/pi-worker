@@ -7,11 +7,9 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "^2.0.35",
-    "@cloudflare/codemode": "^0.2.2",
+    "pi-worker": "workspace:*",
     "@cloudflare/sandbox": "0.7.18",
-    "ai": "^6.0.116",
-    "zod": "^4.3.6"
+    "@sinclair/typebox": "^0.34.41"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250313.0",
