@@ -1,8 +1,11 @@
 /**
  * FFmpeg Agent — pi-mono agent with R2-mounted sandbox.
  *
- * R2 is mounted directly into the sandbox at /data. ffmpeg reads input
- * and writes output there — no file transfer through the Worker.
+ * Containers are shared across requests (pooled by SANDBOX binding).
+ * R2 is mounted once at /data. Per-request isolation is handled by:
+ * - R2 tool prefix: agent sees "input/video.mp4", R2 key is "<requestId>/input/video.mp4"
+ * - Sandbox paths: ffmpeg operates on /data/<requestId>/ subdirectory
+ * - Signed URLs: scoped to the request's R2 prefix
  */
 
 import {
@@ -27,13 +30,16 @@ interface Env {
 	FILES: R2Bucket;
 	R2_ACCESS_KEY_ID: string;
 	R2_SECRET_ACCESS_KEY: string;
-	R2_ENDPOINT: string; // https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+	R2_ENDPOINT: string;
 }
 
-function createFfmpegHelpers(sandbox: ReturnType<typeof getSandbox>) {
+// Number of containers in the pool. Requests are routed to a random container.
+const POOL_SIZE = 3;
+
+function createFfmpegHelpers(sandbox: ReturnType<typeof getSandbox>, workdir: string) {
 	return {
 		async ffmpeg(args: string) {
-			await sandbox.mkdir("/data/output", { recursive: true });
+			await sandbox.mkdir(`${workdir}/output`, { recursive: true });
 			const r = await sandbox.exec(`ffmpeg -y ${args}`, { timeout: 120_000 });
 			return r.success
 				? { success: true, stderr: r.stderr.slice(-1000) }
@@ -49,7 +55,7 @@ function createFfmpegHelpers(sandbox: ReturnType<typeof getSandbox>) {
 				: { success: false, error: r.stderr.slice(-1000) };
 		},
 		async listOutputs() {
-			const r = await sandbox.exec("ls -la /data/output/ 2>/dev/null || echo '(empty)'");
+			const r = await sandbox.exec(`ls -la ${workdir}/output/ 2>/dev/null || echo '(empty)'`);
 			return r.stdout;
 		},
 	};
@@ -58,22 +64,19 @@ function createFfmpegHelpers(sandbox: ReturnType<typeof getSandbox>) {
 const SYSTEM_PROMPT = `You are a media processing agent with ffmpeg.
 
 Tools:
-- read, write, edit, ls: manage files in R2 storage (paths like "input/video.mp4")
+- read, write, edit, ls: manage your files (isolated per request)
 - execute: run JavaScript code with ffmpeg helpers
 
-The R2 bucket is mounted at /data in the sandbox. Files you write to R2
-are immediately available to ffmpeg at /data/<path>, and ffmpeg outputs
-written to /data/ are immediately in R2.
-
 The "execute" tool runs code with these helpers:
-  await ffmpeg("-i /data/input/video.mp4 -vf scale=480:-1 /data/output/out.gif")
-  await ffprobe("/data/input/video.mp4")
+  await ffmpeg("-i /data/WORKDIR/input/video.mp4 -vf scale=480:-1 /data/WORKDIR/output/out.gif")
+  await ffprobe("/data/WORKDIR/input/video.mp4")
   await listOutputs()
 
 You can also pass URLs directly to ffmpeg:
-  await ffmpeg("-i https://example.com/video.mp4 /data/output/out.mp4")
+  await ffmpeg("-i https://example.com/video.mp4 /data/WORKDIR/output/out.mp4")
 
-Always write outputs to /data/output/. Always use -y flag.`;
+Always write outputs to /data/WORKDIR/output/. Always use -y flag.
+Replace WORKDIR with the working directory provided in the prompt.`;
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -97,25 +100,35 @@ export default {
 		if (!prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
 		const files = formData.getAll("file") as File[];
-		const sessionId = `ffmpeg-${Date.now()}`;
-		const sandbox = getSandbox(env.SANDBOX, sessionId);
+		const requestId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+		// Pick a container from the pool — stable ID means container reuse
+		const containerSlot = Math.floor(Math.random() * POOL_SIZE);
+		const sandbox = getSandbox(env.SANDBOX, `ffmpeg-pool-${containerSlot}`);
+
+		// Per-request working directory inside the shared mount
+		const workdir = `/data/${requestId}`;
 
 		try {
-			// Mount R2 bucket at /data, scoped to this session's prefix
-			await sandbox.mountBucket("ffmpeg-agent-files", "/data", {
-				endpoint: env.R2_ENDPOINT,
-				prefix: `/${sessionId}/`,
-				credentials: {
-					accessKeyId: env.R2_ACCESS_KEY_ID,
-					secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-				},
-			});
+			// Mount the whole R2 bucket once (idempotent — no-ops if already mounted)
+			try {
+				await sandbox.mountBucket("ffmpeg-agent-files", "/data", {
+					endpoint: env.R2_ENDPOINT,
+					credentials: {
+						accessKeyId: env.R2_ACCESS_KEY_ID,
+						secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+					},
+				});
+			} catch (e: any) {
+				// Ignore "already mounted" errors on reused containers
+				if (!e.message?.includes("already mounted") && !e.message?.includes("mount point")) throw e;
+			}
 
-			// Upload input files to R2 under session prefix — they appear at /data/input/ in sandbox
+			// Upload input files to R2 under request prefix
 			const fileNames: string[] = [];
 			if (files.length > 0) {
 				for (const file of files) {
-					const key = `${sessionId}/input/${file.name}`;
+					const key = `${requestId}/input/${file.name}`;
 					await env.FILES.put(key, await file.arrayBuffer());
 					fileNames.push(file.name);
 				}
@@ -123,15 +136,15 @@ export default {
 
 			const agent = new Agent({
 				initialState: {
-					systemPrompt: SYSTEM_PROMPT,
+					systemPrompt: SYSTEM_PROMPT.replaceAll("WORKDIR", requestId),
 					model: getModel("openrouter", "google/gemini-3-flash-preview"),
 					thinkingLevel: "off",
 					tools: [
-						createR2ReadTool(env.FILES, { prefix: sessionId }),
-						createR2WriteTool(env.FILES, { prefix: sessionId }),
-						createR2EditTool(env.FILES, { prefix: sessionId }),
-						createR2LsTool(env.FILES, { prefix: sessionId }),
-						createExecuteTool(env.LOADER, createFfmpegHelpers(sandbox), { bucket: env.FILES }),
+						createR2ReadTool(env.FILES, { prefix: requestId }),
+						createR2WriteTool(env.FILES, { prefix: requestId }),
+						createR2EditTool(env.FILES, { prefix: requestId }),
+						createR2LsTool(env.FILES, { prefix: requestId }),
+						createExecuteTool(env.LOADER, createFfmpegHelpers(sandbox, workdir), { bucket: env.FILES }),
 					],
 				},
 				getApiKey: async () => env.OPENROUTER_API_KEY,
@@ -143,13 +156,13 @@ export default {
 			});
 
 			const userPrompt = files.length > 0
-				? `Input files in R2 at input/: ${fileNames.join(", ")} (available in sandbox at /data/input/)\n\n${prompt}`
-				: prompt;
+				? `Working directory: ${requestId}\nInput files at ${workdir}/input/: ${fileNames.join(", ")}\n\n${prompt}`
+				: `Working directory: ${requestId}\n\n${prompt}`;
 
 			await agent.prompt(userPrompt);
 
-			// Output files are already in R2 under sessionId/output/ — just sign them
-			const listed = await env.FILES.list({ prefix: `${sessionId}/output/` });
+			// Output files are already in R2 under requestId/output/
+			const listed = await env.FILES.list({ prefix: `${requestId}/output/` });
 			const response = lastText(agent);
 
 			if (listed.objects.length === 0) {
@@ -158,7 +171,7 @@ export default {
 
 			const outputUrls: Record<string, string> = {};
 			for (const obj of listed.objects) {
-				const name = obj.key.replace(`${sessionId}/output/`, "");
+				const name = obj.key.replace(`${requestId}/output/`, "");
 				if (!name) continue;
 				const path = await downloads.sign(obj.key);
 				outputUrls[name] = new URL(path, request.url).href;
