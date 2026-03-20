@@ -1,0 +1,29 @@
+{
+  "name": "terminal-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    "@mariozechner/pi-ai/dist/utils/validation.js": "pi-worker/dist/validation-noop.js"
+  },
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "terminal-agent-files"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSIONS",
+        "class_name": "TerminalSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["TerminalSession"]
+    }
+  ]
+}

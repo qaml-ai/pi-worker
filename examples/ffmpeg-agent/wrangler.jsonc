@@ -3,9 +3,6 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
-  "alias": {
-    "@mariozechner/pi-ai/dist/utils/validation.js": "pi-worker/dist/validation-noop.js"
-  },
   "worker_loaders": [
     {
       "binding": "LOADER"
