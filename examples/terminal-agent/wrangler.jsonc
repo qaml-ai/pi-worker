@@ -3,9 +3,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
-  "alias": {
-    "@mariozechner/pi-ai/dist/utils/validation.js": "pi-worker/dist/validation-noop.js"
-  },
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
   "r2_buckets": [
     {
       "binding": "FILES",
@@ -16,7 +18,7 @@
     "bindings": [
       {
         "name": "SESSIONS",
-        "class_name": "TerminalSession"
+        "class_name": "TerminalSessionV2"
       }
     ]
   },
@@ -24,6 +26,10 @@
     {
       "tag": "v1",
       "new_classes": ["TerminalSession"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["TerminalSessionV2"]
     }
   ]
 }
