@@ -10,7 +10,7 @@
 
 import { createSqliteTools } from "pi-worker";
 import { renderFrontend } from "./frontend.js";
-import { dispatchPublishedWorker } from "./published-workers.js";
+import { dispatchPublishedWorker, type PublishedWorkerCacheEntry } from "./published-workers.js";
 import { TuiSession, type HistoryEntry, type PersistedPiState } from "./tui-session.js";
 
 interface Env {
@@ -91,6 +91,7 @@ export class TerminalSessionV2 implements DurableObject {
 	private env: Env;
 	private tuiSession?: TuiSession;
 	private pendingInitialRedraw = new Set<WebSocket>();
+	private publishedWorkerCache = new Map<string, PublishedWorkerCacheEntry>();
 
 	constructor(state: DurableObjectState, env: Env) {
 		this.state = state;
@@ -271,6 +272,7 @@ export class TerminalSessionV2 implements DurableObject {
 	private createPublishedWorkerStore() {
 		return {
 			put: async (name: string, file: string) => {
+				this.publishedWorkerCache.delete(name);
 				this.state.storage.sql.exec(
 					"INSERT OR REPLACE INTO published_workers (name, file, updated_at) VALUES (?, ?, ?)",
 					name,
@@ -288,6 +290,7 @@ export class TerminalSessionV2 implements DurableObject {
 				return { name: row.name as string, file: row.file as string, updatedAt: Number(row.updated_at) };
 			},
 			delete: async (name: string) => {
+				this.publishedWorkerCache.delete(name);
 				const before = this.state.storage.sql.exec(
 					"SELECT 1 FROM published_workers WHERE name = ? LIMIT 1",
 					name,
@@ -362,6 +365,15 @@ export class TerminalSessionV2 implements DurableObject {
 				routeStore: this.createPublishedWorkerStore(),
 				sessionId: this.getSessionId(),
 				outbound: this.env.OUTBOUND,
+				cache: {
+					get: (key: string) => this.publishedWorkerCache.get(key),
+					put: (key: string, entry: PublishedWorkerCacheEntry) => {
+						this.publishedWorkerCache.set(key, entry);
+					},
+					delete: (key: string) => {
+						this.publishedWorkerCache.delete(key);
+					},
+				},
 			}, workerName, request, workerPathname || "/");
 		}
 

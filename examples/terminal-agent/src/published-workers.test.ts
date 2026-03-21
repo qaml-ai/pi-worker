@@ -6,6 +6,21 @@ import { createPublishedWorkerTools, dispatchPublishedWorker } from "./published
 type FileEntry = { content: string; updatedAt: number };
 type RouteEntry = { name: string; file: string; updatedAt: number };
 
+function createCountingLoader(loader: any) {
+	let buildCount = 0;
+	return {
+		loader: {
+			get(id: string, cb: () => any) {
+				return loader.get(id, () => {
+					buildCount++;
+					return cb();
+				});
+			},
+		},
+		getBuildCount: () => buildCount,
+	};
+}
+
 function createMemoryStores(initialFiles: Record<string, FileEntry>) {
 	const files = new Map(Object.entries(initialFiles));
 	const routes = new Map<string, RouteEntry>();
@@ -14,6 +29,9 @@ function createMemoryStores(initialFiles: Record<string, FileEntry>) {
 		get: async (path: string) => files.get(path)?.content,
 		list: async () => [...files.keys()].sort(),
 		getUpdatedAt: async (path: string) => files.get(path)?.updatedAt,
+		set: (path: string, content: string, updatedAt: number) => {
+			files.set(path, { content, updatedAt });
+		},
 	};
 
 	const routeStore = {
@@ -44,11 +62,18 @@ describe("published workers", () => {
 			},
 		});
 
+		const countingLoader = createCountingLoader(env.LOADER as any);
+		const cache = new Map();
 		const [publishWorker] = createPublishedWorkerTools({
-			loader: env.LOADER as any,
+			loader: countingLoader.loader as any,
 			fileStore,
 			routeStore,
 			sessionId: "abc123",
+			cache: {
+				get: (key) => cache.get(key),
+				put: (key, value) => cache.set(key, value),
+				delete: (key) => cache.delete(key),
+			},
 		});
 
 		const published = await publishWorker.execute("publish-1", {
@@ -59,10 +84,15 @@ describe("published workers", () => {
 
 		const response = await dispatchPublishedWorker(
 			{
-				loader: env.LOADER as any,
+				loader: countingLoader.loader as any,
 				fileStore,
 				routeStore,
 				sessionId: "abc123",
+				cache: {
+					get: (key) => cache.get(key),
+					put: (key, value) => cache.set(key, value),
+					delete: (key) => cache.delete(key),
+				},
 			},
 			"hello",
 			new Request("https://example.com/w/abc123/hello/nested/path?x=1"),
@@ -75,6 +105,7 @@ describe("published workers", () => {
 			pathname: "/nested/path",
 			search: "?x=1",
 		});
+		expect(countingLoader.getBuildCount()).toBe(1);
 	});
 
 	it("supports relative imports inside published workers", async () => {
@@ -97,30 +128,82 @@ describe("published workers", () => {
 			},
 		});
 
+		const countingLoader = createCountingLoader(env.LOADER as any);
+		const cache = new Map();
 		const [publishWorker] = createPublishedWorkerTools({
-			loader: env.LOADER as any,
+			loader: countingLoader.loader as any,
 			fileStore,
 			routeStore,
 			sessionId: "imports",
+			cache: {
+				get: (key) => cache.get(key),
+				put: (key, value) => cache.set(key, value),
+				delete: (key) => cache.delete(key),
+			},
 		});
 		await publishWorker.execute("publish-2", {
 			name: "import-test",
 			file: "workers/entry.js",
 		});
 
-		const response = await dispatchPublishedWorker(
+		const firstResponse = await dispatchPublishedWorker(
 			{
-				loader: env.LOADER as any,
+				loader: countingLoader.loader as any,
 				fileStore,
 				routeStore,
 				sessionId: "imports",
+				cache: {
+					get: (key) => cache.get(key),
+					put: (key, value) => cache.set(key, value),
+					delete: (key) => cache.delete(key),
+				},
 			},
 			"import-test",
 			new Request("https://example.com/w/imports/import-test"),
 			"/",
 		);
 
-		expect(response.status).toBe(200);
-		expect(await response.text()).toBe("hello from import");
+		expect(firstResponse.status).toBe(200);
+		expect(await firstResponse.text()).toBe("hello from import");
+		expect(countingLoader.getBuildCount()).toBe(1);
+
+		const secondResponse = await dispatchPublishedWorker(
+			{
+				loader: countingLoader.loader as any,
+				fileStore,
+				routeStore,
+				sessionId: "imports",
+				cache: {
+					get: (key) => cache.get(key),
+					put: (key, value) => cache.set(key, value),
+					delete: (key) => cache.delete(key),
+				},
+			},
+			"import-test",
+			new Request("https://example.com/w/imports/import-test"),
+			"/",
+		);
+		expect(await secondResponse.text()).toBe("hello from import");
+		expect(countingLoader.getBuildCount()).toBe(1);
+
+		fileStore.set("workers/message.js", 'export const message = "updated import";\n', 2);
+		const thirdResponse = await dispatchPublishedWorker(
+			{
+				loader: countingLoader.loader as any,
+				fileStore,
+				routeStore,
+				sessionId: "imports",
+				cache: {
+					get: (key) => cache.get(key),
+					put: (key, value) => cache.set(key, value),
+					delete: (key) => cache.delete(key),
+				},
+			},
+			"import-test",
+			new Request("https://example.com/w/imports/import-test"),
+			"/",
+		);
+		expect(await thirdResponse.text()).toBe("updated import");
+		expect(countingLoader.getBuildCount()).toBe(2);
 	});
 });

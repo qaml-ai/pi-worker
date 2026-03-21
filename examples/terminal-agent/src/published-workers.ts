@@ -18,12 +18,26 @@ export interface PublishedWorkerRouteStore {
 	list(): Promise<Array<{ name: string; file: string; updatedAt: number }>>;
 }
 
+export interface PublishedWorkerCacheEntry {
+	version: string;
+	modules: Record<string, string>;
+	loaderId: string;
+	publishedUpdatedAt: number;
+	localDependencies: Array<{ path: string; updatedAt: number }>;
+	remoteDependencies: string[];
+}
+
 export interface PublishedWorkerEnv {
 	loader: WorkerLoader;
 	fileStore: PublishedWorkerFileStore;
 	routeStore: PublishedWorkerRouteStore;
 	sessionId: string;
 	outbound?: any;
+	cache?: {
+		get(key: string): PublishedWorkerCacheEntry | undefined;
+		put(key: string, entry: PublishedWorkerCacheEntry): void;
+		delete(key: string): void;
+	};
 }
 
 const publishWorkerSchema = Type.Object({
@@ -111,9 +125,38 @@ async function fetchText(url: string): Promise<{ code: string; url: string }> {
 	return { code: await response.text(), url: response.url || url };
 }
 
+async function sha256Hex(input: string): Promise<string> {
+	const bytes = new TextEncoder().encode(input);
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function computeVersion(input: {
+	publishedUpdatedAt: number;
+	entryFile: string;
+	localDependencies: Array<{ path: string; updatedAt: number }>;
+	remoteDependencies: string[];
+}) {
+	return sha256Hex(JSON.stringify(input));
+}
+
+async function isCacheEntryFresh(
+	cacheEntry: PublishedWorkerCacheEntry,
+	publishedUpdatedAt: number,
+	fileStore: PublishedWorkerFileStore,
+): Promise<boolean> {
+	if (cacheEntry.publishedUpdatedAt !== publishedUpdatedAt) return false;
+	for (const dependency of cacheEntry.localDependencies) {
+		if ((await fileStore.getUpdatedAt(dependency.path)) !== dependency.updatedAt) return false;
+	}
+	return true;
+}
+
 async function buildModules(entryFile: string, entryCode: string, fileStore: PublishedWorkerFileStore) {
 	const modules: Record<string, string> = { "main.js": HTTP_ENTRYPOINT_SOURCE };
 	const seen = new Map<string, string>();
+	const localDependencies = new Map<string, number>();
+	const remoteDependencies = new Set<string>();
 	let counter = 0;
 
 	async function load(
@@ -134,12 +177,14 @@ async function buildModules(entryFile: string, entryCode: string, fileStore: Pub
 			sourceKey = normalizeLocalPath(specifier);
 			code = inlineCode ?? await fileStore.get(sourceKey) ?? "";
 			if (!code) throw new Error(`File not found: ${specifier}`);
+			localDependencies.set(sourceKey, await fileStore.getUpdatedAt(sourceKey) ?? 0);
 		} else if (isRemote) {
 			kind = "remote";
 			const fetched = await fetchText(specifier);
 			sourceKey = fetched.url;
 			code = fetched.code;
 			remoteUrl = fetched.url;
+			remoteDependencies.add(fetched.url);
 		} else if (parent.kind === "remote") {
 			const target = isRelative ? resolveRemote(specifier, parent.url) : esmUrl(specifier);
 			kind = "remote";
@@ -147,6 +192,7 @@ async function buildModules(entryFile: string, entryCode: string, fileStore: Pub
 			sourceKey = fetched.url;
 			code = fetched.code;
 			remoteUrl = fetched.url;
+			remoteDependencies.add(fetched.url);
 		} else {
 			if (isRelative) {
 				kind = "local";
@@ -154,12 +200,14 @@ async function buildModules(entryFile: string, entryCode: string, fileStore: Pub
 				const local = await fileStore.get(sourceKey);
 				if (local == null) throw new Error(`File not found: ${specifier} (resolved to ${sourceKey})`);
 				code = local;
+				localDependencies.set(sourceKey, await fileStore.getUpdatedAt(sourceKey) ?? 0);
 			} else {
 				kind = "remote";
 				const fetched = await fetchText(esmUrl(specifier));
 				sourceKey = fetched.url;
 				code = fetched.code;
 				remoteUrl = fetched.url;
+				remoteDependencies.add(fetched.url);
 			}
 		}
 
@@ -187,7 +235,13 @@ async function buildModules(entryFile: string, entryCode: string, fileStore: Pub
 
 	const entryModuleId = await load(entryFile, null, entryCode);
 	modules["user-code.js"] = `export { default } from "./${entryModuleId}"; export * from "./${entryModuleId}";`;
-	return modules;
+	return {
+		modules,
+		localDependencies: [...localDependencies.entries()]
+			.sort((a, b) => a[0].localeCompare(b[0]))
+			.map(([path, updatedAt]) => ({ path, updatedAt })),
+		remoteDependencies: [...remoteDependencies].sort(),
+	};
 }
 
 function sanitizeWorkerName(name: string): string {
@@ -224,6 +278,7 @@ export function createPublishedWorkerTools(env: PublishedWorkerEnv) {
 			parameters: unpublishWorkerSchema,
 			execute: async (_id: string, { name }: Static<typeof unpublishWorkerSchema>) => {
 				const workerName = sanitizeWorkerName(name);
+				env.cache?.delete(workerName);
 				const existed = await env.routeStore.delete(workerName);
 				return {
 					content: [{ type: "text" as const, text: existed ? `Unpublished /w/${env.sessionId}/${workerName}` : `No published worker named ${workerName}` }],
@@ -261,20 +316,35 @@ export async function dispatchPublishedWorker(
 
 	const entryCode = await env.fileStore.get(published.file);
 	if (entryCode == null) {
+		env.cache?.delete(workerName);
 		return Response.json({ error: `Published file is missing: ${published.file}` }, { status: 404 });
 	}
 
-	const modules = await buildModules(published.file, entryCode, env.fileStore);
-	const version = [
-		published.updatedAt,
-		await env.fileStore.getUpdatedAt(published.file) ?? 0,
-		Date.now(),
-	].join("-");
-	const stub = env.loader.get(`published-${env.sessionId}-${workerName}-${version}`, () => ({
+	let cacheEntry = env.cache?.get(workerName);
+	if (!cacheEntry || !(await isCacheEntryFresh(cacheEntry, published.updatedAt, env.fileStore))) {
+		const built = await buildModules(published.file, entryCode, env.fileStore);
+		const version = await computeVersion({
+			publishedUpdatedAt: published.updatedAt,
+			entryFile: published.file,
+			localDependencies: built.localDependencies,
+			remoteDependencies: built.remoteDependencies,
+		});
+		cacheEntry = {
+			version,
+			modules: built.modules,
+			loaderId: `published-${env.sessionId}-${workerName}-${version}`,
+			publishedUpdatedAt: published.updatedAt,
+			localDependencies: built.localDependencies,
+			remoteDependencies: built.remoteDependencies,
+		};
+		env.cache?.put(workerName, cacheEntry);
+	}
+
+	const stub = env.loader.get(cacheEntry.loaderId, () => ({
 		compatibilityDate: "2025-06-01",
 		compatibilityFlags: ["nodejs_compat"],
 		mainModule: "main.js",
-		modules,
+		modules: cacheEntry.modules,
 		...(env.outbound ? { globalOutbound: env.outbound } : {}),
 		env: {
 			...(env.outbound ? { OUTBOUND: env.outbound } : {}),
