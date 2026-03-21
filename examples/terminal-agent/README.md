@@ -13,7 +13,7 @@ It combines:
 - Durable Object alarm-powered cron jobs
 
 Live deployment in this repo currently targets:
-- `https://pi.camelai.dev`
+- [`https://pi.camelai.dev`](https://pi.camelai.dev)
 
 Social preview image:
 - `https://pi.camelai.dev/og-image.png`
