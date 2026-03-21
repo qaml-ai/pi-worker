@@ -158,6 +158,43 @@ function findOsc8LinkRange(row, col, hyperlinkId) {
   return { start: { x: startX, y: startY }, end: { x: endX, y: endY } };
 }
 
+let cols = 80, rows = 24, ws, charW = 0, charH = 0;
+let fitRaf = 0;
+let fitTimer = 0;
+let touchGesture = null;
+let suppressTouchClickUntil = 0;
+
+function openOsc8LinkAtClientPoint(clientX, clientY) {
+  const canvas = container.querySelector('canvas');
+  if (!canvas || !term.wasmTerm || !term.renderer) return false;
+
+  const metrics = term.renderer.getMetrics?.();
+  const cellW = term.renderer.charWidth || metrics?.width || charW;
+  const cellH = term.renderer.charHeight || metrics?.height || charH;
+  if (!cellW || !cellH) return false;
+
+  const rect = canvas.getBoundingClientRect();
+  const col = Math.floor((clientX - rect.left) / cellW);
+  const row = Math.floor((clientY - rect.top) / cellH);
+  if (col < 0 || row < 0) return false;
+
+  const viewportY = Math.max(0, Math.floor(term.getViewportY?.() ?? 0));
+  const scrollbackLength = term.wasmTerm.getScrollbackLength();
+  const bufferRow = scrollbackLength - viewportY + row;
+  const line = term.buffer.active.getLine(bufferRow);
+  if (!line || col >= line.length) return false;
+
+  const cell = line.getCell(col);
+  const hyperlinkId = cell?.getHyperlinkId?.() ?? 0;
+  if (!hyperlinkId) return false;
+
+  const url = term.wasmTerm.getHyperlinkUri(hyperlinkId);
+  if (!url) return false;
+
+  window.open(url, '_blank', 'noopener,noreferrer');
+  return true;
+}
+
 term.registerLinkProvider({
   provideLinks(row, callback) {
     const line = term.buffer.active.getLine(row);
@@ -403,8 +440,23 @@ container.addEventListener('touchcancel', (event) => {
   event.stopPropagation();
 }, { passive: true, capture: true });
 
+container.addEventListener('mousedown', (event) => {
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (openOsc8LinkAtClientPoint(event.clientX, event.clientY)) {
+    suppressTouchClickUntil = Date.now() + 500;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, true);
+
 container.addEventListener('click', (event) => {
   if (Date.now() < suppressTouchClickUntil) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
+  if (openOsc8LinkAtClientPoint(event.clientX, event.clientY)) {
     event.preventDefault();
     event.stopPropagation();
   }
