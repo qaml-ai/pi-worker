@@ -19,6 +19,13 @@
       "service": "terminal-agent-outbound"
     }
   ],
+  "routes": [
+    {
+      "pattern": "pi.camelai.app",
+      "custom_domain": true,
+      "zone_name": "camelai.app"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
