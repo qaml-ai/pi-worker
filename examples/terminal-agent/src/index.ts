@@ -11,6 +11,7 @@
 import { createSqliteTools } from "pi-worker";
 import { nextCronRun, type CronJobRecord } from "./cron-tools.js";
 import { renderFrontend } from "./frontend.js";
+import { OG_IMAGE_BASE64 } from "./og-image.js";
 import { dispatchPublishedWorker, type PublishedWorkerCacheEntry } from "./published-workers.js";
 import { TuiSession, type HistoryEntry, type PersistedPiState } from "./tui-session.js";
 
@@ -37,9 +38,18 @@ export default {
 			return Response.redirect(new URL(`/s/${id}`, url.origin).toString(), 302);
 		}
 
+		if (url.pathname === "/og-image.png") {
+			return new Response(Uint8Array.from(atob(OG_IMAGE_BASE64), (c) => c.charCodeAt(0)), {
+				headers: {
+					"content-type": "image/png",
+					"cache-control": "public, max-age=3600",
+				},
+			});
+		}
+
 		const sessionMatch = url.pathname.match(/^\/s\/([a-zA-Z0-9_-]+)$/);
 		if (sessionMatch && request.method === "GET") {
-			return new Response(renderFrontend(sessionMatch[1]), {
+			return new Response(renderFrontend(sessionMatch[1], url.origin), {
 				headers: { "content-type": "text/html; charset=utf-8" },
 			});
 		}

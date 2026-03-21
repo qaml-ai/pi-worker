@@ -13,6 +13,9 @@ It combines:
 Live deployment in this repo currently targets:
 - `https://pi.camelai.dev`
 
+Social preview image:
+- `https://pi.camelai.dev/og-image.png`
+
 ## What it can do
 
 Inside a session, the agent can:
@@ -213,7 +216,8 @@ This runs every 10 minutes in UTC.
 - Published Workers are session-scoped.
 - Cron jobs are session-scoped.
 - `bash` is intentionally not exposed in this environment.
-- The frontend branding lives in `src/frontend.ts`.
+- The frontend branding and Open Graph metadata live in `src/frontend.ts`.
+- The Open Graph image is served by the Worker at `/og-image.png`.
 
 ## Status
 

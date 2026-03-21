@@ -3,13 +3,28 @@
  * Browser acts like a dumb terminal: sends input/resize, renders ANSI from server.
  */
 
-export function renderFrontend(sessionId: string): string {
+export function renderFrontend(sessionId: string, origin: string): string {
+	const pageUrl = `${origin}/s/${sessionId}`;
+	const ogImageUrl = `${origin}/og-image.png`;
 	return /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Terminal Agent</title>
+<title>pi worker agent</title>
+<meta name="description" content="A terminal-native AI coding agent running on Cloudflare Workers with persistent sessions, published workers, and cron jobs." />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="pi worker agent" />
+<meta property="og:description" content="A terminal-native AI coding agent running on Cloudflare Workers with persistent sessions, published workers, and cron jobs." />
+<meta property="og:url" content="${pageUrl}" />
+<meta property="og:image" content="${ogImageUrl}" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="pi worker agent" />
+<meta name="twitter:description" content="A terminal-native AI coding agent running on Cloudflare Workers with persistent sessions, published workers, and cron jobs." />
+<meta name="twitter:image" content="${ogImageUrl}" />
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
   :root {
