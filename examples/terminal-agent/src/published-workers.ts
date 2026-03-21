@@ -32,6 +32,7 @@ export interface PublishedWorkerEnv {
 	fileStore: PublishedWorkerFileStore;
 	routeStore: PublishedWorkerRouteStore;
 	sessionId: string;
+	baseUrl?: string;
 	outbound?: any;
 	cache?: {
 		get(key: string): PublishedWorkerCacheEntry | undefined;
@@ -252,6 +253,15 @@ function sanitizeWorkerName(name: string): string {
 	return normalized;
 }
 
+function workerPath(sessionId: string, workerName: string): string {
+	return `/w/${sessionId}/${workerName}`;
+}
+
+function workerUrl(baseUrl: string | undefined, sessionId: string, workerName: string): string {
+	const path = workerPath(sessionId, workerName);
+	return baseUrl ? new URL(path, baseUrl).toString() : path;
+}
+
 export function createPublishedWorkerTools(env: PublishedWorkerEnv) {
 	return [
 		{
@@ -265,9 +275,11 @@ export function createPublishedWorkerTools(env: PublishedWorkerEnv) {
 				const content = await env.fileStore.get(workerFile);
 				if (content == null) throw new Error(`File not found: ${file}`);
 				await env.routeStore.put(workerName, workerFile);
+				const path = workerPath(env.sessionId, workerName);
+				const url = workerUrl(env.baseUrl, env.sessionId, workerName);
 				return {
-					content: [{ type: "text" as const, text: `Published ${workerFile} at /w/${env.sessionId}/${workerName}` }],
-					details: { name: workerName, file: workerFile, path: `/w/${env.sessionId}/${workerName}` },
+					content: [{ type: "text" as const, text: `Published ${workerFile}\nURL: ${url}` }],
+					details: { name: workerName, file: workerFile, path, url },
 				};
 			},
 		},
@@ -280,9 +292,10 @@ export function createPublishedWorkerTools(env: PublishedWorkerEnv) {
 				const workerName = sanitizeWorkerName(name);
 				env.cache?.delete(workerName);
 				const existed = await env.routeStore.delete(workerName);
+				const url = workerUrl(env.baseUrl, env.sessionId, workerName);
 				return {
-					content: [{ type: "text" as const, text: existed ? `Unpublished /w/${env.sessionId}/${workerName}` : `No published worker named ${workerName}` }],
-					details: { existed },
+					content: [{ type: "text" as const, text: existed ? `Unpublished ${url}` : `No published worker named ${workerName}` }],
+					details: { existed, url },
 				};
 			},
 		},
@@ -293,10 +306,15 @@ export function createPublishedWorkerTools(env: PublishedWorkerEnv) {
 			parameters: listWorkersSchema,
 			execute: async () => {
 				const workers = await env.routeStore.list();
-				const text = workers.length === 0
+				const listed = workers.map((worker) => ({
+					...worker,
+					path: workerPath(env.sessionId, worker.name),
+					url: workerUrl(env.baseUrl, env.sessionId, worker.name),
+				}));
+				const text = listed.length === 0
 					? "(no published workers)"
-					: workers.map((worker) => `${worker.name} -> ${worker.file} -> /w/${env.sessionId}/${worker.name}`).join("\n");
-				return { content: [{ type: "text" as const, text }], details: { workers } };
+					: listed.map((worker) => `${worker.name} -> ${worker.file} -> ${worker.url}`).join("\n");
+				return { content: [{ type: "text" as const, text }], details: { workers: listed } };
 			},
 		},
 	];

@@ -32,6 +32,7 @@ interface Env {
 	CF_GATEWAY_NAME: string;
 	AI_GATEWAY_MODEL?: string;
 	sessionId: string;
+	baseUrl?: string;
 	fileTools: any[];
 	fileStore: {
 		get(path: string): Promise<string | undefined>;
@@ -257,6 +258,7 @@ export class TuiSession {
 				},
 				routeStore: this.env.publishedWorkers,
 				sessionId: this.env.sessionId,
+				baseUrl: this.env.baseUrl,
 				outbound: this.env.OUTBOUND,
 			}));
 			customTools.push(createExecuteTool(this.env.LOADER, {

@@ -315,6 +315,10 @@ export class TerminalSessionV2 implements DurableObject {
 		return this.getMeta("sessionName") || this.state.id.toString();
 	}
 
+	private getBaseUrl(): string | undefined {
+		return this.getMeta("baseUrl") || undefined;
+	}
+
 	private getOrCreateSession(): TuiSession {
 		if (!this.tuiSession) {
 			this.ensureSeedFiles();
@@ -330,6 +334,7 @@ export class TerminalSessionV2 implements DurableObject {
 					CF_GATEWAY_NAME: this.env.CF_GATEWAY_NAME,
 					AI_GATEWAY_MODEL: this.env.AI_GATEWAY_MODEL,
 					sessionId: this.getSessionId(),
+					baseUrl: this.getBaseUrl(),
 					fileTools,
 					fileStore,
 					publishedWorkers: this.createPublishedWorkerStore(),
@@ -355,6 +360,9 @@ export class TerminalSessionV2 implements DurableObject {
 		if (sessionName && !this.getMeta("sessionName")) {
 			this.setMeta("sessionName", sessionName);
 		}
+		if (!this.getMeta("baseUrl")) {
+			this.setMeta("baseUrl", url.origin);
+		}
 
 		const publishedWorkerMatch = url.pathname.match(/^\/worker\/([a-zA-Z0-9_-]+)(\/.*)?$/);
 		if (publishedWorkerMatch) {
@@ -364,6 +372,7 @@ export class TerminalSessionV2 implements DurableObject {
 				fileStore: this.createFileStore(),
 				routeStore: this.createPublishedWorkerStore(),
 				sessionId: this.getSessionId(),
+				baseUrl: this.getBaseUrl(),
 				outbound: this.env.OUTBOUND,
 				cache: {
 					get: (key: string) => this.publishedWorkerCache.get(key),
