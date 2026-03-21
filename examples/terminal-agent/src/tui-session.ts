@@ -16,6 +16,7 @@
 
 import { createExecuteTool, sanitizePath } from "pi-worker";
 import { createPublishedWorkerTools } from "./published-workers.js";
+import { createCronTools, type CronJobRecord } from "./cron-tools.js";
 import {
 	AuthStorage,
 	createAgentSession,
@@ -46,6 +47,11 @@ interface Env {
 		delete(name: string): Promise<boolean>;
 		list(): Promise<Array<{ name: string; file: string; updatedAt: number }>>;
 	};
+	cronJobs: {
+		create(schedule: string, prompt: string): Promise<CronJobRecord>;
+		delete(id: string): Promise<boolean>;
+		list(): Promise<CronJobRecord[]>;
+	};
 	LOADER?: any;
 	OUTBOUND?: any;
 }
@@ -68,6 +74,7 @@ You have file tools to read, write, edit, and list files in a persistent SQLite-
 You also have an execute tool to run JavaScript code in an isolated V8 sandbox.
 The execute environment supports local relative imports from the filesystem and package imports resolved through esm.sh. File-based scripts can import other local files and many ESM packages. Inline execute also supports imports when you provide a full ES module with an explicit export default async function.
 You can also publish filesystem-backed Cloudflare Workers at relative endpoints like /w/<session>/<name> using the worker publishing tools. Published worker files should export either a default async function(request, env, ctx) or default { fetch(request, env, ctx) { ... } }.
+You can also create recurring cron jobs that send prompts back into this session using Durable Object alarms. Cron schedules use 5-field UTC syntax and currently cannot run more frequently than every 10 minutes.
 This session is persistent — the user can disconnect and reconnect, and the conversation
 history and files will still be here.
 
@@ -248,6 +255,8 @@ export class TuiSession {
 		const resourceLoader = createResourceLoader(SYSTEM_PROMPT);
 		const customTools: any[] = [...this.env.fileTools];
 
+		customTools.push(...createCronTools(this.env.cronJobs));
+
 		if (this.env.LOADER) {
 			customTools.push(...createPublishedWorkerTools({
 				loader: this.env.LOADER,
@@ -417,5 +426,12 @@ export class TuiSession {
 	async handleInput(data: string): Promise<void> {
 		await this.ensureStarted();
 		this.terminal.receiveInput(data);
+	}
+
+	async sendScheduledPrompt(prompt: string): Promise<void> {
+		await this.ensureStarted();
+		if (!this.session) throw new Error("Session not initialized");
+		await this.session.sendUserMessage(prompt, this.session.isStreaming ? { deliverAs: "followUp" } : undefined);
+		this.persistState();
 	}
 }

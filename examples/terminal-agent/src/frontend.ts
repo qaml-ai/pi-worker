@@ -15,22 +15,74 @@ export function renderFrontend(sessionId: string): string {
   :root {
     --page-bg: #111111;
     --page-fg: #d0d0d0;
-    --panel-bg: #161616;
-    --panel-border: #2a2a2a;
-    --panel-muted: #7a7a7a;
-    --panel-accent: #e5e5e5;
+    --panel-bg: #11161d;
+    --panel-border: #243241;
+    --panel-muted: #8a97a6;
+    --panel-accent: #f3f7fb;
+    --panel-link: #7dd3fc;
     --panel-success: #73c991;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { background: var(--page-bg); color: var(--page-fg); height: 100%; width: 100%; overflow: hidden; }
   body { display: flex; flex-direction: column; }
   header {
-    padding: 8px 16px; background: var(--panel-bg); border-bottom: 1px solid var(--panel-border);
-    display: flex; align-items: center; gap: 12px; flex-shrink: 0; height: 36px;
+    padding: 7px 16px;
+    background: linear-gradient(180deg, rgba(19, 28, 36, 0.98), rgba(13, 18, 24, 0.98));
+    border-bottom: 1px solid var(--panel-border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+    min-height: 38px;
   }
-  header h1 { font-size: 13px; font-weight: 600; color: var(--panel-accent); }
-  header .session { font-size: 11px; color: var(--panel-muted); font-family: 'JetBrains Mono', monospace; background: #101010; padding: 2px 8px; border-radius: 4px; }
-  header .status { margin-left: auto; font-size: 11px; display: flex; align-items: center; gap: 6px; }
+  header .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+  header h1 {
+    font-size: 13px;
+    line-height: 1;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--panel-accent);
+    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+    white-space: nowrap;
+  }
+  header .powered {
+    font-size: 10px;
+    line-height: 1;
+    color: var(--panel-muted);
+    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+    white-space: nowrap;
+  }
+  header .powered a {
+    color: var(--panel-link);
+    text-decoration: none;
+  }
+  header .powered a:hover {
+    text-decoration: underline;
+  }
+  header .session {
+    font-size: 11px;
+    color: var(--panel-muted);
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid rgba(125, 211, 252, 0.12);
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+  header .status {
+    margin-left: auto;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+    color: var(--panel-muted);
+  }
   header .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--panel-muted); transition: background 0.2s; }
   header .dot.connected { background: var(--panel-success); }
   #terminal-container { flex: 1; width: 100%; overflow: hidden; }
@@ -38,7 +90,10 @@ export function renderFrontend(sessionId: string): string {
 </head>
 <body>
 <header>
-  <h1>Terminal Agent</h1>
+  <div class="brand">
+    <h1>worker agent</h1>
+    <div class="powered">by <a href="https://camelai.com" target="_blank" rel="noopener noreferrer">camelai.com</a></div>
+  </div>
   <span class="session">${sessionId}</span>
   <div class="status">
     <div class="dot" id="status-dot"></div>
@@ -164,75 +219,39 @@ let fitTimer = 0;
 let touchGesture = null;
 let suppressTouchClickUntil = 0;
 
-function openOsc8LinkAtClientPoint(clientX, clientY) {
-  const canvas = container.querySelector('canvas');
-  if (!canvas || !term.wasmTerm || !term.renderer) return false;
+function enableOpenOnClickForLinks() {
+  const linkDetector = term.linkDetector;
+  if (!linkDetector || (linkDetector).__openOnClickPatched) return;
+  (linkDetector).__openOnClickPatched = true;
 
-  const metrics = term.renderer.getMetrics?.();
-  const cellW = term.renderer.charWidth || metrics?.width || charW;
-  const cellH = term.renderer.charHeight || metrics?.height || charH;
-  if (!cellW || !cellH) return false;
+  for (const provider of linkDetector.providers ?? []) {
+    const originalProvideLinks = provider?.provideLinks?.bind(provider);
+    if (!originalProvideLinks) continue;
 
-  const rect = canvas.getBoundingClientRect();
-  const col = Math.floor((clientX - rect.left) / cellW);
-  const row = Math.floor((clientY - rect.top) / cellH);
-  if (col < 0 || row < 0) return false;
+    provider.provideLinks = (row, callback) => {
+      originalProvideLinks(row, (links) => {
+        if (!links?.length) {
+          callback();
+          return;
+        }
 
-  const viewportY = Math.max(0, Math.floor(term.getViewportY?.() ?? 0));
-  const scrollbackLength = term.wasmTerm.getScrollbackLength();
-  const bufferRow = scrollbackLength - viewportY + row;
-  const line = term.buffer.active.getLine(bufferRow);
-  if (!line || col >= line.length) return false;
-
-  const cell = line.getCell(col);
-  const hyperlinkId = cell?.getHyperlinkId?.() ?? 0;
-  if (!hyperlinkId) return false;
-
-  const url = term.wasmTerm.getHyperlinkUri(hyperlinkId);
-  if (!url) return false;
-
-  window.open(url, '_blank', 'noopener,noreferrer');
-  return true;
-}
-
-term.registerLinkProvider({
-  provideLinks(row, callback) {
-    const line = term.buffer.active.getLine(row);
-    if (!line || !term.wasmTerm) {
-      callback();
-      return;
-    }
-
-    const links = [];
-    const seen = new Set();
-    for (let col = 0; col < line.length; col++) {
-      const cell = line.getCell(col);
-      if (!cell) continue;
-      const hyperlinkId = cell.getHyperlinkId();
-      if (hyperlinkId === 0 || seen.has(hyperlinkId)) continue;
-      seen.add(hyperlinkId);
-
-      const url = term.wasmTerm.getHyperlinkUri(hyperlinkId);
-      if (!url) continue;
-
-      links.push({
-        text: url,
-        range: findOsc8LinkRange(row, col, hyperlinkId),
-        activate: () => {
-          window.open(url, '_blank', 'noopener,noreferrer');
-        },
+        callback(
+          links.map((link) => {
+            if (!link?.text || typeof link.activate !== 'function') return link;
+            return {
+              ...link,
+              activate: () => {
+                window.open(link.text, '_blank', 'noopener,noreferrer');
+              },
+            };
+          }),
+        );
       });
-    }
+    };
+  }
 
-    callback(links.length > 0 ? links : void 0);
-  },
-});
-
-let cols = 80, rows = 24, ws, charW = 0, charH = 0;
-let fitRaf = 0;
-let fitTimer = 0;
-let touchGesture = null;
-let suppressTouchClickUntil = 0;
+  linkDetector.invalidateCache?.();
+}
 
 function updateCellMetrics(force = false) {
   const canvas = container.querySelector('canvas');
@@ -440,27 +459,7 @@ container.addEventListener('touchcancel', (event) => {
   event.stopPropagation();
 }, { passive: true, capture: true });
 
-container.addEventListener('mousedown', (event) => {
-  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-  if (openOsc8LinkAtClientPoint(event.clientX, event.clientY)) {
-    suppressTouchClickUntil = Date.now() + 500;
-    event.preventDefault();
-    event.stopPropagation();
-  }
-}, true);
-
-container.addEventListener('click', (event) => {
-  if (Date.now() < suppressTouchClickUntil) {
-    event.preventDefault();
-    event.stopPropagation();
-    return;
-  }
-
-  if (openOsc8LinkAtClientPoint(event.clientX, event.clientY)) {
-    event.preventDefault();
-    event.stopPropagation();
-  }
-}, true);
+enableOpenOnClickForLinks();
 
 container.addEventListener('pointerup', (event) => {
   if (event.pointerType === 'touch' && Date.now() < suppressTouchClickUntil) {

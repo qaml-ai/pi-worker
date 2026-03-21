@@ -9,6 +9,7 @@
  */
 
 import { createSqliteTools } from "pi-worker";
+import { nextCronRun, type CronJobRecord } from "./cron-tools.js";
 import { renderFrontend } from "./frontend.js";
 import { dispatchPublishedWorker, type PublishedWorkerCacheEntry } from "./published-workers.js";
 import { TuiSession, type HistoryEntry, type PersistedPiState } from "./tui-session.js";
@@ -123,6 +124,16 @@ export class TerminalSessionV2 implements DurableObject {
 				name TEXT PRIMARY KEY,
 				file TEXT NOT NULL,
 				updated_at INTEGER NOT NULL
+			)
+		`);
+		state.storage.sql.exec(`
+			CREATE TABLE IF NOT EXISTS cron_jobs (
+				id TEXT PRIMARY KEY,
+				schedule TEXT NOT NULL,
+				prompt TEXT NOT NULL,
+				next_run_at INTEGER NOT NULL,
+				last_run_at INTEGER,
+				created_at INTEGER NOT NULL
 			)
 		`);
 	}
@@ -269,6 +280,18 @@ export class TerminalSessionV2 implements DurableObject {
 		};
 	}
 
+	private async scheduleNextAlarm(): Promise<void> {
+		const rows = this.state.storage.sql.exec(
+			"SELECT next_run_at FROM cron_jobs ORDER BY next_run_at ASC LIMIT 1"
+		).toArray();
+		if (rows.length === 0) {
+			await this.state.storage.deleteAlarm();
+			return;
+		}
+		const nextRunAt = Number((rows[0] as any).next_run_at);
+		await this.state.storage.setAlarm(nextRunAt);
+	}
+
 	private createPublishedWorkerStore() {
 		return {
 			put: async (name: string, file: string) => {
@@ -311,6 +334,53 @@ export class TerminalSessionV2 implements DurableObject {
 		};
 	}
 
+	private createCronJobStore() {
+		return {
+			create: async (schedule: string, prompt: string): Promise<CronJobRecord> => {
+				const now = Date.now();
+				const job: CronJobRecord = {
+					id: crypto.randomUUID().slice(0, 8),
+					schedule,
+					prompt,
+					nextRunAt: nextCronRun(schedule, now),
+					createdAt: now,
+				};
+				this.state.storage.sql.exec(
+					"INSERT INTO cron_jobs (id, schedule, prompt, next_run_at, created_at) VALUES (?, ?, ?, ?, ?)",
+					job.id,
+					job.schedule,
+					job.prompt,
+					job.nextRunAt,
+					job.createdAt,
+				);
+				await this.scheduleNextAlarm();
+				return job;
+			},
+			delete: async (id: string) => {
+				const existed = this.state.storage.sql.exec(
+					"SELECT 1 FROM cron_jobs WHERE id = ? LIMIT 1",
+					id,
+				).toArray().length > 0;
+				this.state.storage.sql.exec("DELETE FROM cron_jobs WHERE id = ?", id);
+				await this.scheduleNextAlarm();
+				return existed;
+			},
+			list: async (): Promise<CronJobRecord[]> => {
+				const rows = this.state.storage.sql.exec(
+					"SELECT id, schedule, prompt, next_run_at, last_run_at, created_at FROM cron_jobs ORDER BY next_run_at ASC"
+				).toArray();
+				return rows.map((row: any) => ({
+					id: row.id as string,
+					schedule: row.schedule as string,
+					prompt: row.prompt as string,
+					nextRunAt: Number(row.next_run_at),
+					lastRunAt: row.last_run_at == null ? undefined : Number(row.last_run_at),
+					createdAt: Number(row.created_at),
+				}));
+			},
+		};
+	}
+
 	private getSessionId(): string {
 		return this.getMeta("sessionName") || this.state.id.toString();
 	}
@@ -338,6 +408,7 @@ export class TerminalSessionV2 implements DurableObject {
 					fileTools,
 					fileStore,
 					publishedWorkers: this.createPublishedWorkerStore(),
+					cronJobs: this.createCronJobStore(),
 					LOADER: this.env.LOADER,
 					OUTBOUND: this.env.OUTBOUND,
 				},
@@ -471,6 +542,37 @@ export class TerminalSessionV2 implements DurableObject {
 	async webSocketError(ws: WebSocket): Promise<void> {
 		this.pendingInitialRedraw.delete(ws);
 		this.saveSessionState();
+	}
+
+	async alarm(): Promise<void> {
+		const now = Date.now();
+		const rows = this.state.storage.sql.exec(
+			"SELECT id, schedule, prompt, next_run_at FROM cron_jobs WHERE next_run_at <= ? ORDER BY next_run_at ASC",
+			now,
+		).toArray();
+		if (rows.length === 0) {
+			await this.scheduleNextAlarm();
+			return;
+		}
+
+		const session = this.getOrCreateSession();
+		for (const row of rows as any[]) {
+			const prompt = String(row.prompt);
+			const jobId = String(row.id);
+			await session.sendScheduledPrompt(prompt);
+			this.replaceHistory(session.getHistory());
+			this.setMeta("piState", JSON.stringify(session.getPersistedState()));
+			this.setMeta("lastActivity", String(Date.now()));
+			const nextRunAt = nextCronRun(String(row.schedule), Math.max(Number(row.next_run_at), Date.now()));
+			this.state.storage.sql.exec(
+				"UPDATE cron_jobs SET last_run_at = ?, next_run_at = ? WHERE id = ?",
+				now,
+				nextRunAt,
+				jobId,
+			);
+			this.broadcast(`\r\n  \x1b[38;5;117m⏰ Cron job ${jobId} triggered\x1b[0m\r\n`);
+		}
+		await this.scheduleNextAlarm();
 	}
 
 	private broadcast(data: string): void {
