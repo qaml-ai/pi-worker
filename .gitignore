@@ -6,3 +6,4 @@ dist/
 bun.lock
 .dev.vars.swp
 *.swp
+tmp/
