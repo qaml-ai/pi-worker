@@ -15,7 +15,7 @@
  */
 
 import { createExecuteTool, sanitizePath } from "pi-worker";
-import { createSqliteTools } from "./sqlite-tools.js";
+import { createPublishedWorkerTools } from "./published-workers.js";
 import {
 	AuthStorage,
 	createAgentSession,
@@ -31,11 +31,19 @@ interface Env {
 	CF_ACCOUNT_ID: string;
 	CF_GATEWAY_NAME: string;
 	AI_GATEWAY_MODEL?: string;
+	sessionId: string;
 	fileTools: any[];
 	fileStore: {
 		get(path: string): Promise<string | undefined>;
+		getUpdatedAt(path: string): Promise<number | undefined>;
 		put(path: string, content: string): Promise<void>;
 		list(): Promise<string[]>;
+	};
+	publishedWorkers: {
+		put(name: string, file: string): Promise<void>;
+		get(name: string): Promise<{ name: string; file: string; updatedAt: number } | undefined>;
+		delete(name: string): Promise<boolean>;
+		list(): Promise<Array<{ name: string; file: string; updatedAt: number }>>;
 	};
 	LOADER?: any;
 	OUTBOUND?: any;
@@ -58,6 +66,7 @@ const SYSTEM_PROMPT = `You are a helpful AI coding assistant running inside a te
 You have file tools to read, write, edit, and list files in a persistent SQLite-backed filesystem.
 You also have an execute tool to run JavaScript code in an isolated V8 sandbox.
 The execute environment supports local relative imports from the filesystem and package imports resolved through esm.sh. File-based scripts can import other local files and many ESM packages. Inline execute also supports imports when you provide a full ES module with an explicit export default async function.
+You can also publish filesystem-backed Cloudflare Workers at relative endpoints like /w/<session>/<name> using the worker publishing tools. Published worker files should export either a default async function(request, env, ctx) or default { fetch(request, env, ctx) { ... } }.
 This session is persistent — the user can disconnect and reconnect, and the conversation
 history and files will still be here.
 
@@ -239,6 +248,17 @@ export class TuiSession {
 		const customTools: any[] = [...this.env.fileTools];
 
 		if (this.env.LOADER) {
+			customTools.push(...createPublishedWorkerTools({
+				loader: this.env.LOADER,
+				fileStore: {
+					get: async (path: string) => this.env.fileStore.get(sanitizePath(path)),
+					list: async () => this.env.fileStore.list(),
+					getUpdatedAt: async (path: string) => this.env.fileStore.getUpdatedAt(sanitizePath(path)),
+				},
+				routeStore: this.env.publishedWorkers,
+				sessionId: this.env.sessionId,
+				outbound: this.env.OUTBOUND,
+			}));
 			customTools.push(createExecuteTool(this.env.LOADER, {
 				readFile: async (path: string) => {
 					const content = await this.env.fileStore.get(sanitizePath(path));

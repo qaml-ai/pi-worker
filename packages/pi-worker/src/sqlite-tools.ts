@@ -1,5 +1,12 @@
+/**
+ * SQLite-backed filesystem tools for pi-worker.
+ *
+ * Same interface as the in-memory and R2 tools but backed by a generic
+ * async key/value store, e.g. Cloudflare Durable Object SQLite storage.
+ */
+
 import { Type, type Static } from "@sinclair/typebox";
-import { fuzzyFindText, generateDiffString, normalizeForFuzzyMatch, sanitizePath } from "pi-worker";
+import { fuzzyFindText, generateDiffString, normalizeForFuzzyMatch, sanitizePath } from "./r2-tools.js";
 
 export interface SqliteTextFileStore {
 	get(path: string): Promise<string | undefined>;

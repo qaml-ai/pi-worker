@@ -8,8 +8,9 @@
  * This variant uses pi's real AgentSession + patched InteractiveMode.
  */
 
+import { createSqliteTools } from "pi-worker";
 import { renderFrontend } from "./frontend.js";
-import { createSqliteTools } from "./sqlite-tools.js";
+import { dispatchPublishedWorker } from "./published-workers.js";
 import { TuiSession, type HistoryEntry, type PersistedPiState } from "./tui-session.js";
 
 interface Env {
@@ -44,8 +45,22 @@ export default {
 
 		const wsMatch = url.pathname.match(/^\/ws\/([a-zA-Z0-9_-]+)$/);
 		if (wsMatch) {
-			const doId = env.SESSIONS.idFromName(wsMatch[1]);
-			return env.SESSIONS.get(doId).fetch(request);
+			const sessionId = wsMatch[1];
+			const doId = env.SESSIONS.idFromName(sessionId);
+			const forwarded = new Request(request, {
+				headers: new Headers([...request.headers, ["x-session-name", sessionId]]),
+			});
+			return env.SESSIONS.get(doId).fetch(forwarded);
+		}
+
+		const workerMatch = url.pathname.match(/^\/w\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)(\/.*)?$/);
+		if (workerMatch) {
+			const [, sessionId, workerName, restPath] = workerMatch;
+			const doId = env.SESSIONS.idFromName(sessionId);
+			const headers = new Headers(request.headers);
+			headers.set("x-session-name", sessionId);
+			const forwardedUrl = new URL(`/worker/${workerName}${restPath || ""}${url.search}`, url.origin);
+			return env.SESSIONS.get(doId).fetch(new Request(forwardedUrl, { method: request.method, headers, body: request.body, redirect: request.redirect }));
 		}
 
 		const apiMatch = url.pathname.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)$/);
@@ -99,6 +114,13 @@ export class TerminalSessionV2 implements DurableObject {
 			CREATE TABLE IF NOT EXISTS files (
 				path TEXT PRIMARY KEY,
 				content TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		state.storage.sql.exec(`
+			CREATE TABLE IF NOT EXISTS published_workers (
+				name TEXT PRIMARY KEY,
+				file TEXT NOT NULL,
 				updated_at INTEGER NOT NULL
 			)
 		`);
@@ -187,7 +209,28 @@ export class TerminalSessionV2 implements DurableObject {
 		this.state.storage.sql.exec(
 			"INSERT INTO files (path, content, updated_at) VALUES (?, ?, ?)",
 			"examples/README.txt",
-			"Run the execute tool with file: examples/import-test.js to verify package imports and local filesystem helpers.",
+			[
+				"Run the execute tool with file: examples/import-test.js to verify package imports and local filesystem helpers.",
+				"",
+				"You can also publish HTTP workers from files. Try examples/hello-worker.js with publish_worker name=hello file=examples/hello-worker.js.",
+			].join("\n"),
+			Date.now(),
+		);
+		this.state.storage.sql.exec(
+			"INSERT INTO files (path, content, updated_at) VALUES (?, ?, ?)",
+			"examples/hello-worker.js",
+			[
+				"export default {",
+				"  async fetch(request) {",
+				"    const url = new URL(request.url);",
+				"    return Response.json({",
+				"      ok: true,",
+				"      pathname: url.pathname,",
+				"      search: url.search,",
+				"    });",
+				"  },",
+				"};",
+			].join("\n"),
 			Date.now(),
 		);
 	}
@@ -200,6 +243,13 @@ export class TerminalSessionV2 implements DurableObject {
 					path,
 				).toArray();
 				return rows.length > 0 ? (rows[0] as any).content as string : undefined;
+			},
+			getUpdatedAt: async (path: string) => {
+				const rows = this.state.storage.sql.exec(
+					"SELECT updated_at FROM files WHERE path = ?",
+					path,
+				).toArray();
+				return rows.length > 0 ? Number((rows[0] as any).updated_at) : undefined;
 			},
 			put: async (path: string, content: string) => {
 				this.state.storage.sql.exec(
@@ -218,12 +268,57 @@ export class TerminalSessionV2 implements DurableObject {
 		};
 	}
 
+	private createPublishedWorkerStore() {
+		return {
+			put: async (name: string, file: string) => {
+				this.state.storage.sql.exec(
+					"INSERT OR REPLACE INTO published_workers (name, file, updated_at) VALUES (?, ?, ?)",
+					name,
+					file,
+					Date.now(),
+				);
+			},
+			get: async (name: string) => {
+				const rows = this.state.storage.sql.exec(
+					"SELECT name, file, updated_at FROM published_workers WHERE name = ?",
+					name,
+				).toArray();
+				if (rows.length === 0) return undefined;
+				const row = rows[0] as any;
+				return { name: row.name as string, file: row.file as string, updatedAt: Number(row.updated_at) };
+			},
+			delete: async (name: string) => {
+				const before = this.state.storage.sql.exec(
+					"SELECT 1 FROM published_workers WHERE name = ? LIMIT 1",
+					name,
+				).toArray().length > 0;
+				this.state.storage.sql.exec("DELETE FROM published_workers WHERE name = ?", name);
+				return before;
+			},
+			list: async () => {
+				const rows = this.state.storage.sql.exec(
+					"SELECT name, file, updated_at FROM published_workers ORDER BY name"
+				).toArray();
+				return rows.map((row: any) => ({
+					name: row.name as string,
+					file: row.file as string,
+					updatedAt: Number(row.updated_at),
+				}));
+			},
+		};
+	}
+
+	private getSessionId(): string {
+		return this.getMeta("sessionName") || this.state.id.toString();
+	}
+
 	private getOrCreateSession(): TuiSession {
 		if (!this.tuiSession) {
 			this.ensureSeedFiles();
 			const history = this.loadHistory();
 			const piState = this.loadPiState();
-			const fileTools = createSqliteTools(this.createFileStore());
+			const fileStore = this.createFileStore();
+			const fileTools = createSqliteTools(fileStore);
 			this.tuiSession = new TuiSession(
 				(msg) => this.broadcast(msg),
 				{
@@ -231,8 +326,10 @@ export class TerminalSessionV2 implements DurableObject {
 					CF_ACCOUNT_ID: this.env.CF_ACCOUNT_ID,
 					CF_GATEWAY_NAME: this.env.CF_GATEWAY_NAME,
 					AI_GATEWAY_MODEL: this.env.AI_GATEWAY_MODEL,
+					sessionId: this.getSessionId(),
 					fileTools,
-					fileStore: this.createFileStore(),
+					fileStore,
+					publishedWorkers: this.createPublishedWorkerStore(),
 					LOADER: this.env.LOADER,
 					OUTBOUND: this.env.OUTBOUND,
 				},
@@ -251,6 +348,22 @@ export class TerminalSessionV2 implements DurableObject {
 
 	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
+		const sessionName = request.headers.get("x-session-name")?.trim();
+		if (sessionName && !this.getMeta("sessionName")) {
+			this.setMeta("sessionName", sessionName);
+		}
+
+		const publishedWorkerMatch = url.pathname.match(/^\/worker\/([a-zA-Z0-9_-]+)(\/.*)?$/);
+		if (publishedWorkerMatch) {
+			const [, workerName, workerPathname] = publishedWorkerMatch;
+			return dispatchPublishedWorker({
+				loader: this.env.LOADER,
+				fileStore: this.createFileStore(),
+				routeStore: this.createPublishedWorkerStore(),
+				sessionId: this.getSessionId(),
+				outbound: this.env.OUTBOUND,
+			}, workerName, request, workerPathname || "/");
+		}
 
 		if (url.pathname === "/info") {
 			const count = (this.state.storage.sql.exec(

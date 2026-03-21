@@ -32,6 +32,16 @@ export {
 	type MemoryToolOptions,
 } from "./memory-tools.js";
 
+// SQLite file tools
+export {
+	createSqliteReadTool,
+	createSqliteWriteTool,
+	createSqliteEditTool,
+	createSqliteLsTool,
+	createSqliteTools,
+	type SqliteTextFileStore,
+} from "./sqlite-tools.js";
+
 // Code execution tool
 export { createExecuteTool, type ExecuteToolHelpers, type ExecuteToolOptions } from "./execute-tool.js";
 
