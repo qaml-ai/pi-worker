@@ -1,5 +1,7 @@
 # pi worker agent
 
+![pi worker agent Open Graph preview](./src/og-preview.png)
+
 A terminal-style AI coding agent running fully on Cloudflare Workers.
 
 It combines:
