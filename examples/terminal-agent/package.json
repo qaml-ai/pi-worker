@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.41",
-    "pi-coding-agent-worker": "github:qaml-ai/pi-coding-agent-worker-package#v0.1.0",
-    "pi-worker": "github:qaml-ai/pi-worker-package#v0.1.0"
+    "pi-coding-agent-worker": "0.1.0",
+    "pi-worker": "0.1.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.13.3",
