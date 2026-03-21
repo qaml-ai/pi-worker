@@ -21,9 +21,9 @@
   ],
   "routes": [
     {
-      "pattern": "pi.camelai.app",
+      "pattern": "pi.camelai.dev",
       "custom_domain": true,
-      "zone_name": "camelai.app"
+      "zone_name": "camelai.dev"
     }
   ],
   "durable_objects": {
