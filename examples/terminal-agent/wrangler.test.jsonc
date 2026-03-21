@@ -1,0 +1,11 @@
+{
+  "name": "terminal-agent-test",
+  "main": "src/test-worker.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ]
+}

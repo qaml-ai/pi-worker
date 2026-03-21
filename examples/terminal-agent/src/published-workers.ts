@@ -8,7 +8,7 @@ export interface PublishedWorkerFileStore {
 }
 
 interface WorkerLoader {
-	get(id: string, cb: () => any): { fetch(request: Request): Promise<Response> };
+	get(id: string, cb: () => any): { getEntrypoint(name: string): { run(request: Request): Promise<Response> } };
 }
 
 export interface PublishedWorkerRouteStore {
@@ -38,6 +38,7 @@ const unpublishWorkerSchema = Type.Object({
 const listWorkersSchema = Type.Object({});
 
 const HTTP_ENTRYPOINT_SOURCE = `
+import { WorkerEntrypoint } from "cloudflare:workers";
 import userModule from "./user-code.js";
 
 function pickHandler(mod) {
@@ -47,12 +48,12 @@ function pickHandler(mod) {
   return null;
 }
 
-export default {
-  async fetch(request, env, ctx) {
-    if (env?.OUTBOUND?.fetch) {
+export class Runner extends WorkerEntrypoint {
+  async run(request) {
+    if (this.env?.OUTBOUND?.fetch) {
       globalThis.fetch = (input, init) => {
         const forwarded = input instanceof Request ? input : new Request(input, init);
-        return env.OUTBOUND.fetch(forwarded);
+        return this.env.OUTBOUND.fetch(forwarded);
       };
     }
 
@@ -61,12 +62,14 @@ export default {
       throw new Error("Published worker must export either a default fetch handler function or default { fetch() {} }");
     }
 
-    const response = await handler(request, env, ctx);
+    const response = await handler(request, this.env, this.ctx);
     if (response instanceof Response) return response;
     if (typeof response === "string") return new Response(response);
     return Response.json(response ?? null);
-  },
-};
+  }
+}
+
+export default { fetch() { return new Response("published-worker"); } };
 `;
 
 const IMPORT_RE = /(import\s+(?:[^"'`]+?\s+from\s+)?|export\s+[^"'`]+?\s+from\s+)(["'])([^"']+)(\2)/g;
@@ -278,8 +281,9 @@ export async function dispatchPublishedWorker(
 		},
 	}));
 
+	const runner = stub.getEntrypoint("Runner");
 	const forwardedUrl = new URL(request.url);
 	forwardedUrl.pathname = workerPathname || "/";
 	const forwarded = new Request(forwardedUrl, request);
-	return stub.fetch(forwarded);
+	return runner.run(forwarded);
 }

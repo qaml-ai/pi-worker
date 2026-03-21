@@ -5,6 +5,8 @@
   "scripts": {
     "predev": "bun run --cwd ../../packages/pi-worker build && npm --prefix ../.. --workspace pi-tui-worker run build && npm --prefix ../.. --workspace pi-coding-agent-worker run build",
     "dev": "wrangler dev",
+    "pretest": "bun run --cwd ../../packages/pi-worker build",
+    "test": "vitest run -c vitest.config.ts",
     "predeploy": "bun run --cwd ../../packages/pi-worker build && npm --prefix ../.. --workspace pi-tui-worker run build && npm --prefix ../.. --workspace pi-coding-agent-worker run build",
     "deploy": "wrangler deploy"
   },
@@ -14,8 +16,10 @@
     "pi-worker": "0.1.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.13.3",
     "@cloudflare/workers-types": "^4.20250313.0",
     "patch-package": "^8.0.1",
+    "vitest": "^4.1.0",
     "wrangler": "^4.0.0"
   }
 }
