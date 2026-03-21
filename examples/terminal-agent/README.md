@@ -15,13 +15,6 @@ It combines:
 Live deployment in this repo currently targets:
 - [`https://pi.camelai.dev`](https://pi.camelai.dev)
 
-Social preview image:
-- `https://pi.camelai.dev/og-image.png`
-
-Favicons served by the Worker:
-- `https://pi.camelai.dev/favicon.svg`
-- `https://pi.camelai.dev/favicon-32x32.png`
-- `https://pi.camelai.dev/favicon.ico`
 
 ## What it can do
 
@@ -224,7 +217,6 @@ This runs every 10 minutes in UTC.
 - Cron jobs are session-scoped.
 - `bash` is intentionally not exposed in this environment.
 - The frontend branding and Open Graph metadata live in `src/frontend.ts`.
-- The Open Graph image is served by the Worker at `/og-image.png`.
 
 ## Status
 
