@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { createExecuteTool } from "./execute-tool.js";
 
 // Can't test full execution without a Worker Loader binding,
 // but we can test the code wrapping logic by importing internals.
@@ -31,5 +32,35 @@ describe("execute tool module structure", () => {
 		const wrapped = `export default async function({ helper }) {\n${code}\n}`;
 
 		expect(wrapped).toContain("helper(");
+	});
+
+	it("forwards outbound bindings into the dynamic worker config", async () => {
+		let capturedConfig: any;
+		const outbound = { fetch: async () => new Response("ok") };
+		const loader = {
+			get(_id: string, cb: () => any) {
+				capturedConfig = cb();
+				return {
+					getEntrypoint() {
+						return {
+							async run() {
+								return "ok";
+							},
+						};
+					},
+				};
+			},
+		};
+
+		const tool = createExecuteTool(loader as any, {}, {
+			globalOutbound: outbound,
+			outboundBinding: outbound,
+		});
+
+		await tool.execute("test", { code: 'return "ok";' });
+
+		expect(capturedConfig.globalOutbound).toBe(outbound);
+		expect(capturedConfig.env.OUTBOUND).toBe(outbound);
+		expect(capturedConfig.modules["main.js"]).toContain("this.env?.OUTBOUND?.fetch");
 	});
 });

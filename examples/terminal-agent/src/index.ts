@@ -1,36 +1,30 @@
 /**
  * Terminal Agent — WebSocket-based AI assistant with Durable Object persistence.
  *
- * Uses SQLite-backed Durable Object storage for session history.
- * Streams agent output over WebSocket via ghostty-web frontend.
+ * Uses SQLite-backed Durable Object storage.
+ * Streams ANSI output over WebSocket to a ghostty-web frontend.
+ * Browser sends raw keyboard input + resize events back to the Worker.
  *
- * Routes:
- *   GET  /                → redirect to new session
- *   GET  /s/:id           → frontend (HTML with ghostty-web)
- *   GET  /ws/:id          → WebSocket upgrade → Durable Object
- *   GET  /api/sessions/:id → session metadata (JSON)
+ * This variant uses pi's real AgentSession + patched InteractiveMode.
  */
 
 import { renderFrontend } from "./frontend.js";
-import { TuiSession, type HistoryEntry } from "./tui-session.js";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { createSqliteTools } from "./sqlite-tools.js";
+import { TuiSession, type HistoryEntry, type PersistedPiState } from "./tui-session.js";
 
 interface Env {
-	OPENROUTER_API_KEY: string;
-	FILES: R2Bucket;
+	CF_GATEWAY_TOKEN: string;
+	CF_ACCOUNT_ID: string;
+	CF_GATEWAY_NAME: string;
+	AI_GATEWAY_MODEL?: string;
 	SESSIONS: DurableObjectNamespace;
-	LOADER: any; // Dynamic Worker Loader
+	LOADER: any;
+	OUTBOUND: Fetcher;
 }
 
 type ClientMessage =
-	| { type: "prompt"; text: string };
-
-// ---------------------------------------------------------------------------
-// Worker
-// ---------------------------------------------------------------------------
+	| { type: "input"; data: string }
+	| { type: "resize"; cols: number; rows: number };
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -60,15 +54,18 @@ export default {
 			return env.SESSIONS.get(doId).fetch(new Request(new URL("/info", url.origin)));
 		}
 
+		const hibernateMatch = url.pathname.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/hibernate$/);
+		if (hibernateMatch && request.method === "POST") {
+			const doId = env.SESSIONS.idFromName(hibernateMatch[1]);
+			return env.SESSIONS.get(doId).fetch(new Request(new URL("/hibernate", url.origin), {
+				method: "POST",
+			}));
+		}
+
 		return Response.json({ error: "Not found" }, { status: 404 });
 	},
 };
 
-// ---------------------------------------------------------------------------
-// Durable Object — TerminalSession (SQLite-backed)
-// ---------------------------------------------------------------------------
-
-// Legacy class kept for migration — will be deleted in v3
 export class TerminalSession implements DurableObject {
 	constructor(private state: DurableObjectState, private _env: Env) {}
 	async fetch(): Promise<Response> { return new Response("Migrated", { status: 410 }); }
@@ -78,13 +75,12 @@ export class TerminalSessionV2 implements DurableObject {
 	private state: DurableObjectState;
 	private env: Env;
 	private tuiSession?: TuiSession;
-	private initialized = false;
+	private pendingInitialRedraw = new Set<WebSocket>();
 
 	constructor(state: DurableObjectState, env: Env) {
 		this.state = state;
 		this.env = env;
 
-		// Create SQLite table on first use
 		state.storage.sql.exec(`
 			CREATE TABLE IF NOT EXISTS history (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +95,13 @@ export class TerminalSessionV2 implements DurableObject {
 				value TEXT NOT NULL
 			)
 		`);
+		state.storage.sql.exec(`
+			CREATE TABLE IF NOT EXISTS files (
+				path TEXT PRIMARY KEY,
+				content TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
 	}
 
 	private loadHistory(): HistoryEntry[] {
@@ -108,11 +111,16 @@ export class TerminalSessionV2 implements DurableObject {
 		return rows.map((r: any) => ({ role: r.role, text: r.text, timestamp: r.timestamp }));
 	}
 
-	private appendHistory(entry: HistoryEntry): void {
-		this.state.storage.sql.exec(
-			"INSERT INTO history (role, text, timestamp) VALUES (?, ?, ?)",
-			entry.role, entry.text, entry.timestamp,
-		);
+	private replaceHistory(entries: HistoryEntry[]): void {
+		this.state.storage.sql.exec("DELETE FROM history");
+		for (const entry of entries) {
+			this.state.storage.sql.exec(
+				"INSERT INTO history (role, text, timestamp) VALUES (?, ?, ?)",
+				entry.role,
+				entry.text,
+				entry.timestamp,
+			);
+		}
 	}
 
 	private setMeta(key: string, value: string): void {
@@ -129,14 +137,114 @@ export class TerminalSessionV2 implements DurableObject {
 		return rows.length > 0 ? (rows[0] as any).value : null;
 	}
 
+	private loadPiState(): PersistedPiState | undefined {
+		const raw = this.getMeta("piState");
+		if (!raw) return undefined;
+		try {
+			return JSON.parse(raw) as PersistedPiState;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private getLastTerminalSize(): { cols: number; rows: number } | undefined {
+		const cols = Number(this.getMeta("lastCols"));
+		const rows = Number(this.getMeta("lastRows"));
+		if (!Number.isFinite(cols) || !Number.isFinite(rows)) return undefined;
+		if (cols < 10 || rows < 5) return undefined;
+		return { cols, rows };
+	}
+
+	private saveSessionState(): void {
+		if (!this.tuiSession) return;
+		this.replaceHistory(this.tuiSession.getHistory());
+		this.setMeta("piState", JSON.stringify(this.tuiSession.getPersistedState()));
+		this.setMeta("lastActivity", String(Date.now()));
+	}
+
+	private ensureSeedFiles(): void {
+		const existing = this.state.storage.sql.exec(
+			"SELECT 1 FROM files WHERE path = ? LIMIT 1",
+			"examples/import-test.js",
+		).toArray();
+		if (existing.length > 0) return;
+		this.state.storage.sql.exec(
+			"INSERT INTO files (path, content, updated_at) VALUES (?, ?, ?)",
+			"examples/import-test.js",
+			[
+				'import { z } from "zod";',
+				'',
+				'export default async function ({ listFiles, writeFile, readFile }) {',
+				'  const schema = z.object({ ok: z.literal(true) });',
+				'  await writeFile("examples/import-result.json", JSON.stringify(schema.parse({ ok: true }), null, 2));',
+				'  const files = await listFiles("examples");',
+				'  const result = await readFile("examples/import-result.json");',
+				'  return { files, result: JSON.parse(result) };',
+				'}',
+			].join("\n"),
+			Date.now(),
+		);
+		this.state.storage.sql.exec(
+			"INSERT INTO files (path, content, updated_at) VALUES (?, ?, ?)",
+			"examples/README.txt",
+			"Run the execute tool with file: examples/import-test.js to verify package imports and local filesystem helpers.",
+			Date.now(),
+		);
+	}
+
+	private createFileStore() {
+		return {
+			get: async (path: string) => {
+				const rows = this.state.storage.sql.exec(
+					"SELECT content FROM files WHERE path = ?",
+					path,
+				).toArray();
+				return rows.length > 0 ? (rows[0] as any).content as string : undefined;
+			},
+			put: async (path: string, content: string) => {
+				this.state.storage.sql.exec(
+					"INSERT OR REPLACE INTO files (path, content, updated_at) VALUES (?, ?, ?)",
+					path,
+					content,
+					Date.now(),
+				);
+			},
+			list: async () => {
+				const rows = this.state.storage.sql.exec(
+					"SELECT path FROM files ORDER BY path"
+				).toArray();
+				return rows.map((r: any) => r.path as string);
+			},
+		};
+	}
+
 	private getOrCreateSession(): TuiSession {
 		if (!this.tuiSession) {
+			this.ensureSeedFiles();
 			const history = this.loadHistory();
+			const piState = this.loadPiState();
+			const fileTools = createSqliteTools(this.createFileStore());
 			this.tuiSession = new TuiSession(
-				(data) => this.broadcast(data),
-				{ OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY, FILES: this.env.FILES, LOADER: this.env.LOADER },
+				(msg) => this.broadcast(msg),
+				{
+					CF_GATEWAY_TOKEN: this.env.CF_GATEWAY_TOKEN,
+					CF_ACCOUNT_ID: this.env.CF_ACCOUNT_ID,
+					CF_GATEWAY_NAME: this.env.CF_GATEWAY_NAME,
+					AI_GATEWAY_MODEL: this.env.AI_GATEWAY_MODEL,
+					fileTools,
+					fileStore: this.createFileStore(),
+					LOADER: this.env.LOADER,
+					OUTBOUND: this.env.OUTBOUND,
+				},
 				history,
+				piState,
+				(state) => {
+					this.setMeta("piState", JSON.stringify(state));
+					this.setMeta("lastActivity", String(Date.now()));
+				},
 			);
+			const lastSize = this.getLastTerminalSize();
+			if (lastSize) this.tuiSession.setSize(lastSize.cols, lastSize.rows);
 		}
 		return this.tuiSession;
 	}
@@ -152,6 +260,18 @@ export class TerminalSessionV2 implements DurableObject {
 				messageCount: count,
 				createdAt: this.getMeta("createdAt"),
 				lastActivity: this.getMeta("lastActivity"),
+				liveSession: !!this.tuiSession,
+				webSocketCount: this.state.getWebSockets().length,
+			});
+		}
+
+		if (url.pathname === "/hibernate" && request.method === "POST") {
+			this.saveSessionState();
+			this.tuiSession?.stop();
+			this.tuiSession = undefined;
+			return Response.json({
+				ok: true,
+				message: "Live session dropped. Next reconnect will restore from DO SQLite.",
 			});
 		}
 
@@ -163,14 +283,18 @@ export class TerminalSessionV2 implements DurableObject {
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 		this.state.acceptWebSocket(server);
+		this.pendingInitialRedraw.add(server);
 
 		const session = this.getOrCreateSession();
 		session.start();
 
+		if (!this.getMeta("createdAt")) this.setMeta("createdAt", String(Date.now()));
+		this.setMeta("lastActivity", String(Date.now()));
+
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
-	async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+	async webSocketMessage(_ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
 		const data = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
 
 		let msg: ClientMessage;
@@ -180,42 +304,39 @@ export class TerminalSessionV2 implements DurableObject {
 			return;
 		}
 
-		if (msg.type !== "prompt" || !msg.text?.trim()) return;
-
 		const session = this.getOrCreateSession();
-		if (session.isBusy()) return;
+
+		if (msg.type === "resize") {
+			this.setMeta("lastCols", String(msg.cols));
+			this.setMeta("lastRows", String(msg.rows));
+			const changed = session.setSize(msg.cols, msg.rows);
+			if (this.pendingInitialRedraw.delete(_ws) || changed) {
+				await session.redraw();
+			}
+			return;
+		}
+
+		if (msg.type !== "input" || typeof msg.data !== "string") return;
 
 		try {
-			if (!this.getMeta("createdAt")) {
-				this.setMeta("createdAt", String(Date.now()));
+			if (this.pendingInitialRedraw.delete(_ws)) {
+				await session.redraw();
 			}
-			this.setMeta("lastActivity", String(Date.now()));
-
-			await session.handlePrompt(msg.text);
-
-			// Persist new history entries to SQLite
-			const history = session.getHistory();
-			// Get current DB count to find new entries
-			const dbCount = (this.state.storage.sql.exec(
-				"SELECT COUNT(*) as cnt FROM history"
-			).toArray()[0] as any).cnt;
-			for (let i = dbCount; i < history.length; i++) {
-				this.appendHistory(history[i]);
-			}
-			this.setMeta("lastActivity", String(Date.now()));
+			await session.handleInput(msg.data);
+			this.saveSessionState();
 		} catch (error: any) {
-			// Surface errors to the client
 			this.broadcast(`\r\n  \x1b[38;5;204m✗ Server error: ${error.message}\x1b[0m\r\n\r\n`);
-			this.broadcast(`\x1b[1m\x1b[38;5;114m❯ \x1b[0m`);
 		}
 	}
 
-	async webSocketClose(): Promise<void> {
-		this.tuiSession = undefined;
+	async webSocketClose(ws: WebSocket): Promise<void> {
+		this.pendingInitialRedraw.delete(ws);
+		this.saveSessionState();
 	}
 
-	async webSocketError(): Promise<void> {
-		this.tuiSession = undefined;
+	async webSocketError(ws: WebSocket): Promise<void> {
+		this.pendingInitialRedraw.delete(ws);
+		this.saveSessionState();
 	}
 
 	private broadcast(data: string): void {

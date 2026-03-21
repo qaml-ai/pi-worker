@@ -1,0 +1,43 @@
+{
+  "name": "pi-coding-agent-worker",
+  "version": "0.1.0",
+  "description": "Worker-friendly fork of @mariozechner/pi-coding-agent",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./hooks": {
+      "types": "./dist/core/hooks/index.d.ts",
+      "import": "./dist/core/hooks/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "node ./scripts/build.mjs"
+  },
+  "dependencies": {
+    "@mariozechner/jiti": "^2.6.2",
+    "@mariozechner/pi-agent-core": "^0.61.1",
+    "@mariozechner/pi-ai": "^0.61.1",
+    "@mariozechner/pi-coding-agent": "^0.61.1",
+    "@sinclair/typebox": "^0.34.41",
+    "cli-highlight": "^2.1.11",
+    "diff": "^8.0.2",
+    "file-type": "^21.1.1",
+    "hosted-git-info": "^9.0.2",
+    "ignore": "^7.0.5",
+    "marked": "^15.0.12",
+    "pi-tui-worker": "0.1.0",
+    "proper-lockfile": "^4.1.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qaml-ai/pi-coding-agent-worker.git",
+    "directory": "packages/pi-coding-agent-worker"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "worker-loader-fetch-repro",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev -c wrangler.jsonc -c outbound/wrangler.jsonc --port 8787"
+  },
+  "dependencies": {
+    "pi-worker": "file:../../packages/pi-worker"
+  },
+  "devDependencies": {
+    "wrangler": "^4.75.0"
+  }
+}

@@ -3,15 +3,20 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "CF_ACCOUNT_ID": "85bbd288051330fb51ee1c86031a299b",
+    "CF_GATEWAY_NAME": "chiridion",
+    "AI_GATEWAY_MODEL": "dynamic/pi"
+  },
   "worker_loaders": [
     {
       "binding": "LOADER"
     }
   ],
-  "r2_buckets": [
+  "services": [
     {
-      "binding": "FILES",
-      "bucket_name": "terminal-agent-files"
+      "binding": "OUTBOUND",
+      "service": "terminal-agent-outbound"
     }
   ],
   "durable_objects": {

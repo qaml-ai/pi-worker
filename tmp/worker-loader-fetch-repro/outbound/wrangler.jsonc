@@ -1,0 +1,6 @@
+{
+  "name": "worker-loader-fetch-repro-outbound",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"]
+}

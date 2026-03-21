@@ -3,15 +3,19 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "bun run --cwd ../../packages/pi-worker build && npm --prefix ../.. --workspace pi-tui-worker run build && npm --prefix ../.. --workspace pi-coding-agent-worker run build",
     "dev": "wrangler dev",
+    "predeploy": "bun run --cwd ../../packages/pi-worker build && npm --prefix ../.. --workspace pi-tui-worker run build && npm --prefix ../.. --workspace pi-coding-agent-worker run build",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "pi-worker": "workspace:*",
-    "@sinclair/typebox": "^0.34.41"
+    "@sinclair/typebox": "^0.34.41",
+    "pi-coding-agent-worker": "0.1.0",
+    "pi-worker": "0.1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250313.0",
+    "patch-package": "^8.0.1",
     "wrangler": "^4.0.0"
   }
 }

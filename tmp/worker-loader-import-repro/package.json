@@ -1,0 +1,14 @@
+{
+  "name": "worker-loader-import-repro",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "pi-worker": "file:../../packages/pi-worker"
+  },
+  "devDependencies": {
+    "wrangler": "^4.75.0"
+  }
+}
