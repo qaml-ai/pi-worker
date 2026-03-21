@@ -38,7 +38,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/qaml-ai/pi-coding-agent-worker.git",
-    "directory": "packages/pi-coding-agent-worker"
+    "url": "git+https://github.com/qaml-ai/pi-coding-agent-worker-package.git"
   }
 }
