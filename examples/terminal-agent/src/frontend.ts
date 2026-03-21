@@ -89,6 +89,108 @@ const term = new Terminal({
 const container = document.getElementById('terminal-container');
 term.open(container);
 
+function findOsc8LinkRange(row, col, hyperlinkId) {
+  const buffer = term.buffer.active;
+  let startY = row;
+  let startX = col;
+
+  while (startX > 0) {
+    const line = buffer.getLine(startY);
+    if (!line) break;
+    const cell = line.getCell(startX - 1);
+    if (!cell || cell.getHyperlinkId() !== hyperlinkId) break;
+    startX--;
+  }
+
+  if (startX === 0 && startY > 0) {
+    let y = startY - 1;
+    while (y >= 0) {
+      const line = buffer.getLine(y);
+      if (!line || line.length === 0) break;
+      const lastCell = line.getCell(line.length - 1);
+      if (!lastCell || lastCell.getHyperlinkId() !== hyperlinkId) break;
+      startY = y;
+      startX = 0;
+      for (let x = line.length - 1; x >= 0; x--) {
+        const cell = line.getCell(x);
+        if (!cell || cell.getHyperlinkId() !== hyperlinkId) {
+          startX = x + 1;
+          break;
+        }
+      }
+      if (startX === 0) y--;
+      else break;
+    }
+  }
+
+  let endY = row;
+  let endX = col;
+  const currentLine = buffer.getLine(endY);
+  if (currentLine) {
+    while (endX < currentLine.length - 1) {
+      const cell = currentLine.getCell(endX + 1);
+      if (!cell || cell.getHyperlinkId() !== hyperlinkId) break;
+      endX++;
+    }
+
+    if (endX === currentLine.length - 1) {
+      let y = endY + 1;
+      const bufferLength = buffer.length;
+      while (y < bufferLength) {
+        const line = buffer.getLine(y);
+        if (!line || line.length === 0) break;
+        const firstCell = line.getCell(0);
+        if (!firstCell || firstCell.getHyperlinkId() !== hyperlinkId) break;
+        endY = y;
+        endX = 0;
+        for (let x = 0; x < line.length; x++) {
+          const cell = line.getCell(x);
+          if (!cell) break;
+          if (cell.getHyperlinkId() !== hyperlinkId) continue;
+          endX = x;
+        }
+        if (endX === 0) y++;
+        else break;
+      }
+    }
+  }
+
+  return { start: { x: startX, y: startY }, end: { x: endX, y: endY } };
+}
+
+term.registerLinkProvider({
+  provideLinks(row, callback) {
+    const line = term.buffer.active.getLine(row);
+    if (!line || !term.wasmTerm) {
+      callback();
+      return;
+    }
+
+    const links = [];
+    const seen = new Set();
+    for (let col = 0; col < line.length; col++) {
+      const cell = line.getCell(col);
+      if (!cell) continue;
+      const hyperlinkId = cell.getHyperlinkId();
+      if (hyperlinkId === 0 || seen.has(hyperlinkId)) continue;
+      seen.add(hyperlinkId);
+
+      const url = term.wasmTerm.getHyperlinkUri(hyperlinkId);
+      if (!url) continue;
+
+      links.push({
+        text: url,
+        range: findOsc8LinkRange(row, col, hyperlinkId),
+        activate: () => {
+          window.open(url, '_blank', 'noopener,noreferrer');
+        },
+      });
+    }
+
+    callback(links.length > 0 ? links : void 0);
+  },
+});
+
 let cols = 80, rows = 24, ws, charW = 0, charH = 0;
 let fitRaf = 0;
 let fitTimer = 0;
