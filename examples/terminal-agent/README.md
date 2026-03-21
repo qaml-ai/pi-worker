@@ -19,7 +19,7 @@ Live deployment in this repo currently targets:
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/qaml-ai/pi-worker/tree/main/examples/terminal-agent)
 
-Note: this example also uses the helper Worker in `examples/terminal-agent-outbound` and requires a `CF_GATEWAY_TOKEN` secret, so you may still need to finish a small amount of post-deploy setup in Cloudflare/Wrangler.
+Note: this example requires a `CF_GATEWAY_TOKEN` secret, so you may still need to finish a small amount of post-deploy setup in Cloudflare/Wrangler.
 
 ## What it can do
 
@@ -35,7 +35,7 @@ Inside a session, the agent can:
 ```txt
 examples/terminal-agent/
 ├── src/
-│   ├── index.ts              # main Worker + Durable Object
+│   ├── index.ts              # main Worker + Durable Object + loopback outbound entrypoint
 │   ├── tui-session.ts        # pi agent session wiring
 │   ├── frontend.ts           # browser terminal UI
 │   ├── sqlite-tools.ts       # SQLite-backed file tools
@@ -46,14 +46,6 @@ examples/terminal-agent/
 ├── vitest.config.ts
 └── wrangler.test.jsonc
 ```
-
-Related helper Worker:
-
-```txt
-examples/terminal-agent-outbound/
-```
-
-That outbound Worker is used as a service binding so dynamically loaded sandbox Workers can make outbound `fetch()` calls.
 
 ## Architecture
 
@@ -80,7 +72,7 @@ The execute tool uses Cloudflare's Dynamic Worker Loader to run user code in iso
 Supports:
 - local relative imports from the session filesystem
 - package imports resolved through `esm.sh`
-- outbound `fetch()` through the outbound binding
+- outbound `fetch()` through a loopback outbound entrypoint in the same Worker
 
 ### Published Workers
 The agent can expose a file as a real HTTP Worker endpoint.
@@ -137,21 +129,11 @@ The `predev` script builds the local worker packages first.
 
 ## Deploy
 
-### Deploy the outbound Worker
-From `examples/terminal-agent-outbound`:
-
-```sh
-npm run deploy
-```
-
-### Deploy the main Worker
 From `examples/terminal-agent`:
 
 ```sh
 npm run deploy
 ```
-
-The main Worker expects the outbound service to be deployed under the service name configured in `wrangler.jsonc`.
 
 ## Config
 
@@ -164,7 +146,6 @@ Important values:
 - `AI_GATEWAY_MODEL`
 - custom domain / routes
 - Durable Object migrations
-- outbound service binding
 - worker loader binding
 
 ## Tests

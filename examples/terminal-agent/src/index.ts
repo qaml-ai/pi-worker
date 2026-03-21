@@ -8,6 +8,7 @@
  * This variant uses pi's real AgentSession + patched InteractiveMode.
  */
 
+import { WorkerEntrypoint, exports as workerExports } from "cloudflare:workers";
 import { createSqliteTools } from "pi-worker";
 import { nextCronRun, type CronJobRecord } from "./cron-tools.js";
 import { FAVICON_ICO_BASE64, FAVICON_PNG_BASE64, FAVICON_SVG } from "./favicon-assets.js";
@@ -23,7 +24,6 @@ interface Env {
 	AI_GATEWAY_MODEL?: string;
 	SESSIONS: DurableObjectNamespace;
 	LOADER: any;
-	OUTBOUND: Fetcher;
 }
 
 type ClientMessage =
@@ -120,6 +120,12 @@ export default {
 	},
 };
 
+export class Outbound extends WorkerEntrypoint {
+	async fetch(request: Request): Promise<Response> {
+		return globalThis.fetch(request);
+	}
+}
+
 export class TerminalSession implements DurableObject {
 	constructor(private state: DurableObjectState, private _env: Env) {}
 	async fetch(): Promise<Response> { return new Response("Migrated", { status: 410 }); }
@@ -131,6 +137,7 @@ export class TerminalSessionV2 implements DurableObject {
 	private tuiSession?: TuiSession;
 	private pendingInitialRedraw = new Set<WebSocket>();
 	private publishedWorkerCache = new Map<string, PublishedWorkerCacheEntry>();
+	private readonly outbound = (workerExports as any).Outbound;
 
 	constructor(state: DurableObjectState, env: Env) {
 		this.state = state;
@@ -448,7 +455,7 @@ export class TerminalSessionV2 implements DurableObject {
 					publishedWorkers: this.createPublishedWorkerStore(),
 					cronJobs: this.createCronJobStore(),
 					LOADER: this.env.LOADER,
-					OUTBOUND: this.env.OUTBOUND,
+					OUTBOUND: this.outbound,
 				},
 				history,
 				piState,
@@ -482,7 +489,7 @@ export class TerminalSessionV2 implements DurableObject {
 				routeStore: this.createPublishedWorkerStore(),
 				sessionId: this.getSessionId(),
 				baseUrl: this.getBaseUrl(),
-				outbound: this.env.OUTBOUND,
+				outbound: this.outbound,
 				cache: {
 					get: (key: string) => this.publishedWorkerCache.get(key),
 					put: (key: string, entry: PublishedWorkerCacheEntry) => {

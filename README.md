@@ -35,9 +35,7 @@ Read more here:
 │   ├── hello-agent/              # minimal example
 │   ├── ffmpeg-agent/             # ffmpeg-focused worker example
 │   ├── codegen-worker/           # code generation / scaffold example
-│   ├── terminal-agent/           # full browser terminal agent
-│   └── terminal-agent-outbound/  # outbound helper worker for terminal-agent
-└── tmp/                          # scratch / investigation area
+│   └── terminal-agent/           # full browser terminal agent
 ```
 
 ## Packages
@@ -82,9 +80,7 @@ Features:
 - code execution in dynamic sandbox Workers
 - publish-a-file-as-a-Worker
 - cron jobs that feed prompts back into the session
-
-### `examples/terminal-agent-outbound`
-A tiny helper Worker used by `terminal-agent` so dynamic sandboxes can perform outbound fetches safely through a service binding.
+- outbound fetch via a loopback Worker entrypoint in the same Worker
 
 ## Getting started
 
@@ -124,7 +120,6 @@ npm test
 ## Notes
 
 - Some examples require local secrets in `.dev.vars`.
-- `tmp/` is not productized code; it is used for experiments and debugging.
 - This repo is actively experimental, but the terminal-agent example is real and deployable.
 
 ## Recommended place to start

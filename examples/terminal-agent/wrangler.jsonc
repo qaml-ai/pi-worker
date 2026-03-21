@@ -13,12 +13,7 @@
       "binding": "LOADER"
     }
   ],
-  "services": [
-    {
-      "binding": "OUTBOUND",
-      "service": "terminal-agent-outbound"
-    }
-  ],
+  
   "routes": [
     {
       "pattern": "pi.camelai.dev",
