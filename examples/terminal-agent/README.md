@@ -15,6 +15,11 @@ It combines:
 Live deployment in this repo currently targets:
 - [`https://pi.camelai.dev`](https://pi.camelai.dev)
 
+## Deploy to Cloudflare
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/qaml-ai/pi-worker/tree/main/examples/terminal-agent)
+
+Note: this example also uses the helper Worker in `examples/terminal-agent-outbound` and requires a `CF_GATEWAY_TOKEN` secret, so you may still need to finish a small amount of post-deploy setup in Cloudflare/Wrangler.
 
 ## What it can do
 
