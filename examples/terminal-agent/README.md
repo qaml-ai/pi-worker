@@ -18,6 +18,11 @@ Live deployment in this repo currently targets:
 Social preview image:
 - `https://pi.camelai.dev/og-image.png`
 
+Favicons served by the Worker:
+- `https://pi.camelai.dev/favicon.svg`
+- `https://pi.camelai.dev/favicon-32x32.png`
+- `https://pi.camelai.dev/favicon.ico`
+
 ## What it can do
 
 Inside a session, the agent can:

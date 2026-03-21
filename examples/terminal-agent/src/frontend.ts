@@ -25,6 +25,9 @@ export function renderFrontend(sessionId: string, origin: string): string {
 <meta name="twitter:title" content="pi worker agent" />
 <meta name="twitter:description" content="A terminal-native AI coding agent running on Cloudflare Workers with persistent sessions, published workers, and cron jobs." />
 <meta name="twitter:image" content="${ogImageUrl}" />
+<link rel="icon" type="image/svg+xml" href="${origin}/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="${origin}/favicon-32x32.png" />
+<link rel="shortcut icon" href="${origin}/favicon.ico" />
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
   :root {

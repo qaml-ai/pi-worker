@@ -10,6 +10,7 @@
 
 import { createSqliteTools } from "pi-worker";
 import { nextCronRun, type CronJobRecord } from "./cron-tools.js";
+import { FAVICON_ICO_BASE64, FAVICON_PNG_BASE64, FAVICON_SVG } from "./favicon-assets.js";
 import { renderFrontend } from "./frontend.js";
 import { OG_IMAGE_BASE64 } from "./og-image.js";
 import { dispatchPublishedWorker, type PublishedWorkerCacheEntry } from "./published-workers.js";
@@ -40,6 +41,33 @@ export default {
 
 		if (url.pathname === "/og-image.png") {
 			return new Response(Uint8Array.from(atob(OG_IMAGE_BASE64), (c) => c.charCodeAt(0)), {
+				headers: {
+					"content-type": "image/png",
+					"cache-control": "public, max-age=3600",
+				},
+			});
+		}
+
+		if (url.pathname === "/favicon.svg") {
+			return new Response(FAVICON_SVG, {
+				headers: {
+					"content-type": "image/svg+xml; charset=utf-8",
+					"cache-control": "public, max-age=3600",
+				},
+			});
+		}
+
+		if (url.pathname === "/favicon.ico") {
+			return new Response(Uint8Array.from(atob(FAVICON_ICO_BASE64), (c) => c.charCodeAt(0)), {
+				headers: {
+					"content-type": "image/x-icon",
+					"cache-control": "public, max-age=3600",
+				},
+			});
+		}
+
+		if (url.pathname === "/favicon-32x32.png") {
+			return new Response(Uint8Array.from(atob(FAVICON_PNG_BASE64), (c) => c.charCodeAt(0)), {
 				headers: {
 					"content-type": "image/png",
 					"cache-control": "public, max-age=3600",
