@@ -1,5 +1,6 @@
 {
   "name": "pi-worker-agents",
   "private": true,
+  "license": "MIT",
   "workspaces": ["packages/*", "examples/*"]
 }
