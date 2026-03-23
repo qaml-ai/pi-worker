@@ -164,6 +164,8 @@ declare function decodeURI(str: string): string;
 // Workers-specific globals
 interface ExecutionContext { waitUntil(promise: Promise<any>): void; passThroughOnException(): void; }
 interface ExportedHandler<Env = unknown> { fetch?(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response; scheduled?(event: any, env: Env, ctx: ExecutionContext): Promise<void> | void; }
+interface ImportMetaEnv { MODE: string; DEV: boolean; PROD: boolean; }
+interface ImportMeta { readonly env: ImportMetaEnv; }
 interface KVNamespace { get(key: string, options?: any): Promise<string | null>; put(key: string, value: string, options?: any): Promise<void>; delete(key: string): Promise<void>; list(options?: any): Promise<any>; }
 interface DurableObjectNamespace { get(id: DurableObjectId): DurableObjectStub; idFromName(name: string): DurableObjectId; idFromString(id: string): DurableObjectId; newUniqueId(): DurableObjectId; }
 interface DurableObjectId { toString(): string; }
