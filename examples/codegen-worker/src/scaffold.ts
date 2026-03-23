@@ -46,79 +46,133 @@ export async function scaffoldProject(
 	const opts = { ...DEFAULTS, ...options };
 	const fontConfig = FONT_CONFIG[opts.font] || FONT_CONFIG.figtree;
 
-	// Fetch shadcn preset (CSS variables for the theme)
 	const presetUrl = buildPresetUrl(opts);
 	const preset = await fetchPreset(presetUrl);
-
-	// Generate CSS from preset + template
 	const css = generateCss(preset, fontConfig);
-
-	// Write all project files
 	const p = prefix;
 
-	// package.json
 	files.set(`${p}package.json`, JSON.stringify({
 		name: projectName,
 		private: true,
 		type: "module",
 		scripts: {
-			dev: "react-router dev",
 			build: "react-router build",
-			deploy: "bun run build && wrangler deploy",
+			"cf-typegen": "bun wrangler types",
+			postinstall: "bun run cf-typegen",
+			deploy: "bun run build && bun wrangler deploy",
+			dev: "react-router dev",
+			preview: "bun run build && vite preview",
+			typecheck: "bun run cf-typegen && react-router typegen && tsc -b",
 		},
 		dependencies: {
-			react: "^19",
-			"react-dom": "^19",
-			"react-router": "^7",
-			"@react-router/cloudflare": "^7",
-			"radix-ui": "^1",
-			"class-variance-authority": "^0.7",
-			"clsx": "^2",
-			"tailwind-merge": "^3",
-			"lucide-react": "^0.5",
-			"tailwindcss": "^4",
-			"@tailwindcss/postcss": "^4",
-			"tw-animate-css": "^1",
-			[fontConfig.package]: "*",
+			[fontConfig.package]: "^5.2.5",
+			"class-variance-authority": "^0.7.1",
+			clsx: "^2.1.1",
+			isbot: "^5.1.31",
+			"lucide-react": "^0.562.0",
+			"radix-ui": "^1.4.3",
+			react: "^19.1.1",
+			"react-dom": "^19.1.1",
+			"react-router": "^7.10.0",
+			"tailwind-merge": "^3.4.0",
+			"tw-animate-css": "^1.4.0",
 		},
 		devDependencies: {
-			"@cloudflare/workers-types": "^4",
-			"@cloudflare/vite-plugin": "^1",
-			typescript: "^5",
-			vite: "^6",
-			wrangler: "^4",
+			"@cloudflare/vite-plugin": "1.22.1",
+			"@react-router/dev": "^7.10.0",
+			"@tailwindcss/vite": "^4.1.13",
+			"@types/node": "^22",
+			"@types/react": "^19.1.13",
+			"@types/react-dom": "^19.1.9",
+			tailwindcss: "^4.1.13",
+			typescript: "^5.9.2",
+			vite: "8.0.0-beta.16",
+			wrangler: "^4.16.0",
 		},
 	}, null, 2));
 
-	// tsconfig.json
 	files.set(`${p}tsconfig.json`, JSON.stringify({
+		files: [],
+		references: [
+			{ path: "./tsconfig.node.json" },
+			{ path: "./tsconfig.cloudflare.json" },
+		],
 		compilerOptions: {
+			checkJs: true,
+			verbatimModuleSyntax: true,
+			skipLibCheck: true,
+			strict: true,
+			noEmit: true,
+			baseUrl: ".",
+			paths: {
+				"~/*": ["./app/*"],
+			},
+			types: ["./worker-configuration.d.ts"],
+		},
+	}, null, 2));
+
+	files.set(`${p}tsconfig.cloudflare.json`, JSON.stringify({
+		extends: "./tsconfig.json",
+		include: [
+			".react-router/types/**/*",
+			"app/**/*",
+			"app/**/.server/**/*",
+			"app/**/.client/**/*",
+			"workers/**/*",
+			"worker-configuration.d.ts",
+		],
+		compilerOptions: {
+			composite: true,
+			strict: true,
+			lib: ["DOM", "DOM.Iterable", "ES2022"],
+			types: ["vite/client"],
 			target: "ES2022",
 			module: "ES2022",
 			moduleResolution: "bundler",
-			strict: true,
-			esModuleInterop: true,
-			skipLibCheck: true,
 			jsx: "react-jsx",
-			paths: { "~/*": ["./app/*"] },
-			types: ["@cloudflare/workers-types"],
+			baseUrl: ".",
+			rootDirs: [".", "./.react-router/types"],
+			paths: {
+				"~/*": ["./app/*"],
+			},
+			esModuleInterop: true,
+			resolveJsonModule: true,
 		},
-		include: ["app", "workers"],
 	}, null, 2));
 
-	// wrangler.jsonc
-	files.set(`${p}wrangler.jsonc`, `{
+	files.set(`${p}tsconfig.node.json`, JSON.stringify({
+		extends: "./tsconfig.json",
+		include: ["vite.config.ts"],
+		compilerOptions: {
+			composite: true,
+			strict: true,
+			types: ["node"],
+			lib: ["ES2022"],
+			target: "ES2022",
+			module: "ES2022",
+			moduleResolution: "bundler",
+		},
+	}, null, 2));
+
+	files.set(`${p}wrangler.jsonc`, `/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "${projectName}",
   "main": "./workers/app.ts",
-  "compatibility_date": "2025-06-01",
+  "compatibility_date": "2026-02-28",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
   "assets": {
     "directory": "./build/client"
   }
 }
 `);
 
-	// components.json (for shadcn CLI compatibility)
 	files.set(`${p}components.json`, JSON.stringify({
 		$schema: "https://ui.shadcn.com/schema.json",
 		style: `radix-${opts.style}`,
@@ -129,6 +183,7 @@ export async function scaffoldProject(
 			css: "app/app.css",
 			baseColor: opts.baseColor,
 			cssVariables: true,
+			prefix: "",
 		},
 		iconLibrary: "lucide",
 		aliases: {
@@ -138,42 +193,107 @@ export async function scaffoldProject(
 			lib: "~/lib",
 			hooks: "~/hooks",
 		},
+		registries: {},
 	}, null, 2));
 
-	// postcss.config.mjs
-	files.set(`${p}postcss.config.mjs`, `export default {
-  plugins: {
-    "@tailwindcss/postcss": {},
-  },
-};
-`);
-
-	// vite.config.ts
 	files.set(`${p}vite.config.ts`, `import { reactRouter } from "@react-router/dev/vite";
 import { cloudflare } from "@cloudflare/vite-plugin";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
+import { resolve } from "path";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
-    reactRouter(),
     cloudflare({ viteEnvironment: { name: "ssr" } }),
+    tailwindcss(),
+    reactRouter(),
   ],
-});
+  resolve: {
+    alias: {
+      "~": resolve(__dirname, "./app"),
+    },
+  },
+  environments: {
+    ssr: {
+      build: {
+        rollupOptions: {
+          input: "virtual:cloudflare/worker-entry",
+        },
+      },
+    },
+  },
+  define: {
+    __filename: "'index.ts'",
+  },
+  optimizeDeps: command === "build" ? { noDiscovery: true } : {},
+}));
 `);
 
-	// react-router.config.ts
 	files.set(`${p}react-router.config.ts`, `import type { Config } from "@react-router/dev/config";
 
 export default {
   ssr: true,
+  future: {
+    v8_viteEnvironmentApi: true,
+  },
 } satisfies Config;
 `);
 
-	// app/app.css (generated from shadcn preset)
 	files.set(`${p}app/app.css`, css);
 
-	// app/root.tsx
-	files.set(`${p}app/root.tsx`, `import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
+	files.set(`${p}app/entry.server.tsx`, `import type { AppLoadContext, EntryContext } from "react-router";
+import { ServerRouter } from "react-router";
+import { isbot } from "isbot";
+import { renderToReadableStream } from "react-dom/server";
+
+export function handleError(error: unknown) {
+  console.error(error);
+}
+
+export default async function handleRequest(
+  request: Request,
+  responseStatusCode: number,
+  responseHeaders: Headers,
+  routerContext: EntryContext,
+  _loadContext: AppLoadContext
+) {
+  let shellRendered = false;
+  const userAgent = request.headers.get("user-agent");
+
+  const body = await renderToReadableStream(
+    <ServerRouter context={routerContext} url={request.url} />,
+    {
+      onError(error: unknown) {
+        responseStatusCode = 500;
+        if (shellRendered) {
+          console.error(error);
+        }
+      },
+    }
+  );
+  shellRendered = true;
+
+  if ((userAgent && isbot(userAgent)) || routerContext.isSpaMode) {
+    await body.allReady;
+  }
+
+  responseHeaders.set("Content-Type", "text/html");
+  return new Response(body, {
+    headers: responseHeaders,
+    status: responseStatusCode,
+  });
+}
+`);
+
+	files.set(`${p}app/root.tsx`, `import {
+  isRouteErrorResponse,
+  Links,
+  Meta,
+  Outlet,
+  Scripts,
+  ScrollRestoration,
+} from "react-router";
+import type { Route } from "./+types/root";
 import "./app.css";
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -197,9 +317,36 @@ export function Layout({ children }: { children: React.ReactNode }) {
 export default function App() {
   return <Outlet />;
 }
+
+export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
+  let message = "Oops!";
+  let details = "An unexpected error occurred.";
+  let stack: string | undefined;
+
+  if (isRouteErrorResponse(error)) {
+    message = error.status === 404 ? "404" : "Error";
+    details = error.status === 404
+      ? "The requested page could not be found."
+      : error.statusText || details;
+  } else if (error && error instanceof Error) {
+    details = error.message;
+    stack = import.meta.env.DEV ? error.stack : undefined;
+  }
+
+  return (
+    <main className="pt-16 p-4 container mx-auto">
+      <h1>{message}</h1>
+      <p>{details}</p>
+      {stack && (
+        <pre className="w-full p-4 overflow-x-auto">
+          <code>{stack}</code>
+        </pre>
+      )}
+    </main>
+  );
+}
 `);
 
-	// app/routes.ts
 	files.set(`${p}app/routes.ts`, `import type { RouteConfig } from "@react-router/dev/routes";
 import { index } from "@react-router/dev/routes";
 
@@ -208,7 +355,6 @@ export default [
 ] satisfies RouteConfig;
 `);
 
-	// app/routes/home.tsx (placeholder)
 	files.set(`${p}app/routes/home.tsx`, `export default function Home() {
   return (
     <div className="flex min-h-screen items-center justify-center">
@@ -218,7 +364,6 @@ export default [
 }
 `);
 
-	// app/lib/utils.ts
 	files.set(`${p}app/lib/utils.ts`, `import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -227,20 +372,33 @@ export function cn(...inputs: ClassValue[]) {
 }
 `);
 
-	// workers/app.ts
-	files.set(`${p}workers/app.ts`, `import { createRequestHandler } from "@react-router/cloudflare";
+	files.set(`${p}workers/app.ts`, `import { createRequestHandler } from "react-router";
 
-const handler = createRequestHandler(() => import("virtual:react-router/server-build"), import.meta.env.MODE);
-
-export default {
-  fetch: handler,
-} satisfies ExportedHandler;
-`);
+declare module "react-router" {
+  export interface AppLoadContext {
+    cloudflare: {
+      env: Env;
+      ctx: ExecutionContext;
+    };
+  }
 }
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
+const requestHandler = createRequestHandler(
+  () => import("virtual:react-router/server-build"),
+  import.meta.env.MODE
+);
+
+export default {
+  async fetch(request, env, ctx) {
+    return requestHandler(request, {
+      cloudflare: { env, ctx },
+    });
+  },
+} satisfies ExportedHandler<Env>;
+`);
+
+	files.set(`${p}public/.gitkeep`, "");
+}
 
 function buildPresetUrl(opts: Required<ScaffoldOptions>): string {
 	const params = new URLSearchParams({

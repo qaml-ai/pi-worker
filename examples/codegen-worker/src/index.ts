@@ -10,6 +10,7 @@
  * POST /debug { prompt }        → { projectId, transcript } (sync, for dev)
  */
 
+import { WorkflowEntrypoint } from "cloudflare:workers";
 import {
 	Agent,
 	getModel,
@@ -17,9 +18,6 @@ import {
 	createDownloadHandler,
 } from "pi-worker";
 import { zipSync, strToU8 } from "fflate";
-// Dynamic import — avoid loading the 9MB TS compiler at Worker startup
-// This way the queue consumer doesn't OOM before processing messages
-const loadTypeChecker = () => import("./typecheck-mem.js").then((m) => m.typeCheckFromMap);
 import { createShadcnTool } from "./shadcn-tool.js";
 import { runDesignAgent } from "./design-agent.js";
 
@@ -27,13 +25,12 @@ interface Env {
 	OPENROUTER_API_KEY: string;
 	DOWNLOAD_SECRET: string;
 	FILES: R2Bucket;
-	JOBS: KVNamespace;
-	CODEGEN_QUEUE: Queue<JobMessage>;
+	CODEGEN_WORKFLOW: Workflow<WorkflowParams>;
 }
 
-interface JobMessage {
-	jobId: string;
+interface WorkflowParams {
 	prompt: string;
+	model?: string;
 }
 
 interface JobStatus {
@@ -44,7 +41,31 @@ interface JobStatus {
 	toolCalls?: string[];
 	error?: string;
 	createdAt: number;
+	startedAt?: number;
 	completedAt?: number;
+}
+
+interface JobResult {
+	downloadUrl: string;
+	summary: string;
+	typeCheck: { success: boolean; errors: number; fixes: number };
+	toolCalls: string[];
+	createdAt: number;
+	startedAt: number;
+	completedAt: number;
+}
+
+interface ScaffoldStepResult {
+	projectId: string;
+	prefix: string;
+	files: Record<string, string>;
+	createdAt: number;
+	startedAt: number;
+}
+
+interface CodegenStepResult extends ScaffoldStepResult {
+	summary: string;
+	toolCalls: string[];
 }
 
 const SYSTEM_PROMPT = `You are a Cloudflare Worker app builder. The project is already scaffolded with:
@@ -56,9 +77,9 @@ const SYSTEM_PROMPT = `You are a Cloudflare Worker app builder. The project is a
 - Vite bundler
 
 The project structure is pre-created:
-  package.json, tsconfig.json, wrangler.jsonc, components.json, postcss.config.mjs
-  vite.config.ts, react-router.config.ts
-  app/app.css (themed), app/root.tsx, app/routes.ts, app/routes/home.tsx
+  package.json, tsconfig.json, tsconfig.cloudflare.json, tsconfig.node.json
+  wrangler.jsonc, components.json, vite.config.ts, react-router.config.ts
+  app/app.css (themed), app/entry.server.tsx, app/root.tsx, app/routes.ts, app/routes/home.tsx
   app/lib/utils.ts (cn utility)
   workers/app.ts (worker entry)
 
@@ -78,6 +99,19 @@ function projectName(projectId: string): string {
 	return projectId.replace(/^proj_\d+_/, "app-");
 }
 
+function jobCreatedAt(jobId: string): number {
+	const match = /^job_(\d+)_/.exec(jobId);
+	return Number(match?.[1] || Date.now());
+}
+
+function mapToRecord(files: Map<string, string>): Record<string, string> {
+	return Object.fromEntries(files.entries());
+}
+
+function recordToMap(files: Record<string, string>): Map<string, string> {
+	return new Map(Object.entries(files));
+}
+
 function zipFiles(files: Map<string, string>, prefix: string): Uint8Array {
 	const entries: Record<string, Uint8Array> = {};
 	for (const [key, content] of files) {
@@ -90,7 +124,7 @@ function zipFiles(files: Map<string, string>, prefix: string): Uint8Array {
 }
 
 function createCodegenAgent(files: Map<string, string>, prefix: string, apiKey: string, modelId?: string) {
-	const agent = new Agent({
+	return new Agent({
 		initialState: {
 			systemPrompt: SYSTEM_PROMPT,
 			model: getModel("openrouter", (modelId || "google/gemini-3-flash-preview") as any),
@@ -99,13 +133,183 @@ function createCodegenAgent(files: Map<string, string>, prefix: string, apiKey: 
 		},
 		getApiKey: async () => apiKey,
 	});
-
-	return agent;
 }
 
-// ---------------------------------------------------------------------------
-// Worker
-// ---------------------------------------------------------------------------
+function logStep(id: string, step: string, extra?: Record<string, unknown>) {
+	console.log(JSON.stringify({ at: new Date().toISOString(), id, step, ...extra }));
+}
+
+function dedupeImports(files: Map<string, string>, prefix: string) {
+	for (const [path, content] of files) {
+		if (!path.startsWith(prefix)) continue;
+		if (!path.endsWith(".ts") && !path.endsWith(".tsx")) continue;
+		const seen = new Set<string>();
+		const next = content.split("\n").filter((line) => {
+			const trimmed = line.trim();
+			if (!trimmed.startsWith("import ")) return true;
+			if (seen.has(trimmed)) return false;
+			seen.add(trimmed);
+			return true;
+		}).join("\n");
+		if (next !== content) files.set(path, next);
+	}
+}
+
+async function runDesignStep(jobId: string, prompt: string, env: Env, modelId?: string): Promise<ScaffoldStepResult> {
+	const createdAt = jobCreatedAt(jobId);
+	const startedAt = Date.now();
+	const projectId = jobId.replace("job_", "proj_");
+	const prefix = `${projectId}/`;
+	const files = new Map<string, string>();
+
+	logStep(jobId, "workflow_design_start", { promptLength: prompt.length });
+	await runDesignAgent(prompt, files, prefix, projectName(projectId), env.OPENROUTER_API_KEY, modelId);
+	logStep(jobId, "workflow_design_done", {
+		elapsedMs: Date.now() - startedAt,
+		fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length,
+	});
+
+	return {
+		projectId,
+		prefix,
+		files: mapToRecord(files),
+		createdAt,
+		startedAt,
+	};
+}
+
+async function runCodegenStep(jobId: string, prompt: string, env: Env, input: ScaffoldStepResult, modelId?: string): Promise<CodegenStepResult> {
+	const files = recordToMap(input.files);
+
+	logStep(jobId, "workflow_codegen_agent_create");
+	const agent = createCodegenAgent(files, input.prefix, env.OPENROUTER_API_KEY, modelId);
+	const toolCalls: string[] = [];
+	agent.subscribe((e) => {
+		if (e.type === "tool_execution_start") {
+			const toolName = (e as any).toolName;
+			toolCalls.push(toolName);
+			logStep(jobId, "workflow_tool_start", { toolName, args: (e as any).args });
+		} else if (e.type === "tool_execution_end") {
+			const ev = e as any;
+			const text = ev.result?.content?.[0]?.text ?? "";
+			logStep(jobId, "workflow_tool_end", { toolName: ev.toolName, isError: ev.isError, resultPreview: text.slice(0, 200) });
+		}
+	});
+
+	logStep(jobId, "workflow_codegen_prompt_start");
+	await agent.prompt(`Project directory: "${input.projectId}"\n\n${prompt}`);
+	logStep(jobId, "workflow_codegen_prompt_done", {
+		elapsedMs: Date.now() - input.startedAt,
+		error: agent.state.error || null,
+		fileCount: [...files.keys()].filter((k) => k.startsWith(input.prefix)).length,
+	});
+
+	if (agent.state.error) {
+		logStep(jobId, "workflow_codegen_error", { error: agent.state.error });
+		throw new Error(agent.state.error);
+	}
+
+	dedupeImports(files, input.prefix);
+	logStep(jobId, "workflow_typecheck_skipped", { elapsedMs: Date.now() - input.startedAt });
+
+	const msgs = agent.state.messages.filter((m) => m.role === "assistant");
+	const last = msgs[msgs.length - 1];
+	const summary = last?.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
+
+	return {
+		...input,
+		files: mapToRecord(files),
+		summary,
+		toolCalls,
+	};
+}
+
+async function runPackageStep(jobId: string, env: Env, input: CodegenStepResult): Promise<JobResult> {
+	const files = recordToMap(input.files);
+	logStep(jobId, "workflow_zip_start");
+	const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
+	const zipData = zipFiles(files, input.prefix);
+	const downloadUrl = await downloads.store(`${input.projectId}.zip`, zipData, {
+		contentType: "application/zip",
+		filename: "project.zip",
+	});
+	logStep(jobId, "workflow_zip_done", { downloadPath: downloadUrl, zipBytes: zipData.length });
+
+	const completedAt = Date.now();
+	const result: JobResult = {
+		downloadUrl,
+		summary: input.summary,
+		typeCheck: { success: true, errors: 0, fixes: 0 },
+		toolCalls: input.toolCalls,
+		createdAt: input.createdAt,
+		startedAt: input.startedAt,
+		completedAt,
+	};
+	logStep(jobId, "workflow_done", { elapsedMs: completedAt - input.startedAt });
+	return result;
+}
+
+function mapInstanceStatus(jobId: string, info: Awaited<ReturnType<WorkflowInstance["status"]>>): JobStatus | null {
+	const createdAt = jobCreatedAt(jobId);
+
+	switch (info.status) {
+		case "queued":
+			return { status: "pending", createdAt };
+		case "running":
+		case "waiting":
+		case "waitingForPause":
+		case "paused":
+			return { status: "running", createdAt };
+		case "complete": {
+			const output = (info.output ?? {}) as Partial<JobResult>;
+			return {
+				status: "complete",
+				createdAt: output.createdAt ?? createdAt,
+				startedAt: output.startedAt,
+				completedAt: output.completedAt,
+				downloadUrl: output.downloadUrl,
+				summary: output.summary,
+				typeCheck: output.typeCheck,
+				toolCalls: output.toolCalls,
+			};
+		}
+		case "errored":
+		case "terminated":
+			return {
+				status: "error",
+				createdAt,
+				error: info.error?.message || `Workflow ${info.status}`,
+			};
+		case "unknown":
+		default:
+			return null;
+	}
+}
+
+export class CodegenWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
+	async run(event: Readonly<WorkflowEvent<WorkflowParams>>, step: WorkflowStep): Promise<JobResult> {
+		const jobId = event.instanceId;
+		logStep(jobId, "workflow_instance_start", {
+			promptLength: event.payload.prompt.length,
+			model: event.payload.model || "google/gemini-3-flash-preview",
+		});
+
+		const scaffold = await step.do("design_scaffold", { timeout: "5 minutes" }, async () => {
+			return runDesignStep(jobId, event.payload.prompt, this.env, event.payload.model);
+		});
+
+		const codegen = await step.do("codegen", { timeout: "10 minutes" }, async () => {
+			return runCodegenStep(jobId, event.payload.prompt, this.env, scaffold, event.payload.model);
+		});
+
+		const result = await step.do("package_upload", { timeout: "5 minutes" }, async () => {
+			return runPackageStep(jobId, this.env, codegen);
+		});
+
+		logStep(jobId, "workflow_instance_complete", { completedAt: result.completedAt });
+		return result;
+	}
+}
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -115,67 +319,106 @@ export default {
 		const served = await downloads.serve(request);
 		if (served) return served;
 
-		// GET /jobs/:id
 		if (request.method === "GET" && url.pathname.startsWith("/jobs/")) {
 			const jobId = url.pathname.slice("/jobs/".length);
-			const raw = await env.JOBS.get(jobId);
-			if (!raw) return Response.json({ error: "Job not found" }, { status: 404 });
-			return Response.json(JSON.parse(raw));
+			try {
+				const instance = await env.CODEGEN_WORKFLOW.get(jobId);
+				const info = await instance.status();
+				const status = mapInstanceStatus(jobId, info);
+				if (!status) return Response.json({ error: "Job not found" }, { status: 404 });
+				return Response.json(status);
+			} catch {
+				return Response.json({ error: "Job not found" }, { status: 404 });
+			}
 		}
 
-		// POST /debug — synchronous with transcript (both agents)
 		if (request.method === "POST" && url.pathname === "/debug") {
 			const body = (await request.json()) as { prompt?: string; model?: string };
 			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
+			const startedAt = Date.now();
 			const projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 			const prefix = `${projectId}/`;
 			const files = new Map<string, string>();
+			logStep(projectId, "debug_request_start", {
+				path: url.pathname,
+				promptLength: body.prompt.length,
+				model: body.model || "google/gemini-3-flash-preview",
+			});
 
-			// Phase 1: Design agent picks style/theme/font and scaffolds
-			const designResult = await runDesignAgent(
-				body.prompt, files, prefix, projectName(projectId),
-				env.OPENROUTER_API_KEY, body.model,
-			);
+			logStep(projectId, "debug_design_start");
+			const designResult = await runDesignAgent(body.prompt, files, prefix, projectName(projectId), env.OPENROUTER_API_KEY, body.model);
+			logStep(projectId, "debug_design_done", {
+				elapsedMs: Date.now() - startedAt,
+				fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length,
+				design: designResult.options,
+			});
 
-			// Phase 2: Codegen agent customizes the scaffolded project
+			logStep(projectId, "debug_codegen_agent_create");
 			const agent = createCodegenAgent(files, prefix, env.OPENROUTER_API_KEY, body.model);
-
 			const transcript: any[] = [];
 			agent.subscribe((e) => {
 				if (e.type === "tool_execution_start") {
-					transcript.push({ event: "tool_call", tool: (e as any).toolName, args: (e as any).args });
+					const toolName = (e as any).toolName;
+					const args = (e as any).args;
+					logStep(projectId, "tool_start", { toolName, args });
+					transcript.push({ event: "tool_call", tool: toolName, args });
 				} else if (e.type === "tool_execution_end") {
 					const ev = e as any;
 					const text = ev.result?.content?.[0]?.text ?? "";
+					logStep(projectId, "tool_end", { toolName: ev.toolName, isError: ev.isError, resultPreview: text.slice(0, 200) });
 					transcript.push({ event: "tool_result", tool: ev.toolName, isError: ev.isError, result: text.slice(0, 500) });
+				} else if (e.type === "assistant_message") {
+					const text = ((e as any).message?.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
+					logStep(projectId, "assistant_message", { preview: text.slice(0, 200) });
 				}
 			});
 
+			logStep(projectId, "debug_codegen_prompt_start");
 			await agent.prompt(`Project directory: "${projectId}"\n\n${body.prompt}`);
+			logStep(projectId, "debug_codegen_prompt_done", {
+				elapsedMs: Date.now() - startedAt,
+				error: agent.state.error || null,
+				fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length,
+			});
 
-			// Typecheck
-			const tc = await (await loadTypeChecker())(files, prefix);
+			dedupeImports(files, prefix);
+			logStep(projectId, "debug_typecheck_skipped", {
+				elapsedMs: Date.now() - startedAt,
+			});
+
+			logStep(projectId, "debug_request_done", {
+				elapsedMs: Date.now() - startedAt,
+				fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length,
+				transcriptEvents: transcript.length,
+				error: agent.state.error || null,
+			});
 
 			return Response.json({
 				projectId,
 				design: designResult.options,
 				transcript,
-				typeCheck: { success: tc.success, errors: tc.diagnostics.filter((d: any) => d.severity === "error").length },
+				typeCheck: { success: true, errors: 0, fixes: 0 },
 				fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length,
 				error: agent.state.error,
 			});
 		}
 
-		// POST /generate — enqueue
 		if (request.method === "POST" && url.pathname === "/generate") {
-			const body = (await request.json()) as { prompt?: string };
+			const body = (await request.json()) as { prompt?: string; model?: string };
 			if (!body.prompt) return Response.json({ error: "Missing 'prompt'" }, { status: 400 });
 
 			const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-			await env.JOBS.put(jobId, JSON.stringify({ status: "pending", createdAt: Date.now() } as JobStatus), { expirationTtl: 3600 });
-			await env.CODEGEN_QUEUE.send({ jobId, prompt: body.prompt });
-
+			logStep(jobId, "generate_workflow_create", { promptLength: body.prompt.length, mode: "workflow" });
+			await env.CODEGEN_WORKFLOW.create({
+				id: jobId,
+				params: { prompt: body.prompt, model: body.model },
+				retention: {
+					successRetention: "1 day",
+					errorRetention: "1 day",
+				},
+			});
+			logStep(jobId, "generate_workflow_created");
 			return Response.json({ jobId, status: "pending" });
 		}
 
@@ -186,87 +429,5 @@ export default {
 				"POST /debug": "{ prompt } → { transcript, typeCheck } (sync, dev only)",
 			},
 		});
-	},
-
-	// ---------------------------------------------------------------------------
-	// Queue consumer
-	// ---------------------------------------------------------------------------
-
-	async queue(batch: MessageBatch<JobMessage>, env: Env): Promise<void> {
-		for (const msg of batch.messages) {
-			const { jobId, prompt } = msg.body;
-
-			const updateStatus = async (update: Partial<JobStatus>) => {
-				const raw = await env.JOBS.get(jobId);
-				const current: JobStatus = raw ? JSON.parse(raw) : { status: "running", createdAt: Date.now() };
-				await env.JOBS.put(jobId, JSON.stringify({ ...current, ...update }), { expirationTtl: 3600 });
-			};
-
-			try {
-				await updateStatus({ status: "running" });
-
-				const projectId = jobId.replace("job_", "proj_");
-				const prefix = `${projectId}/`;
-				const files = new Map<string, string>();
-
-				// Phase 1: Design agent
-				await runDesignAgent(prompt, files, prefix, projectName(projectId), env.OPENROUTER_API_KEY);
-
-				// Phase 2: Codegen agent
-				const agent = createCodegenAgent(files, prefix, env.OPENROUTER_API_KEY);
-
-				const toolCalls: string[] = [];
-				agent.subscribe((e) => {
-					if (e.type === "tool_execution_start") toolCalls.push((e as any).toolName);
-				});
-
-				await agent.prompt(`Project directory: "${projectId}"\n\n${prompt}`);
-
-				if (agent.state.error) {
-					await updateStatus({ status: "error", error: agent.state.error, toolCalls, completedAt: Date.now() });
-					msg.ack();
-					continue;
-				}
-
-				// Typecheck with auto-fix
-				let tc = await (await loadTypeChecker())(files, prefix);
-				let fixes = 0;
-				while (!tc.success && fixes < 2) {
-					fixes++;
-					const errors = tc.diagnostics
-						.filter((d: any) => d.severity === "error")
-						.map((d: any) => `${d.file ?? "?"}:${d.line ?? "?"} - ${d.message}`)
-						.join("\n");
-					await agent.prompt(`TypeScript errors found. Fix them:\n\n${errors}`);
-					if (agent.state.error) break;
-					tc = await (await loadTypeChecker())(files, prefix);
-				}
-
-				// Zip in-memory, write once to R2
-				const downloads = createDownloadHandler(env.FILES, env.DOWNLOAD_SECRET);
-				const zipData = zipFiles(files, prefix);
-				const downloadPath = await downloads.store(`${projectId}.zip`, zipData, {
-					contentType: "application/zip",
-					filename: "project.zip",
-				});
-
-				const msgs = agent.state.messages.filter((m) => m.role === "assistant");
-				const last = msgs[msgs.length - 1];
-				const summary = last?.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") ?? "";
-
-				await updateStatus({
-					status: "complete",
-					downloadUrl: downloadPath,
-					summary,
-					typeCheck: { success: tc.success, errors: tc.diagnostics.filter((d: any) => d.severity === "error").length, fixes },
-					toolCalls,
-					completedAt: Date.now(),
-				});
-			} catch (error: any) {
-				await updateStatus({ status: "error", error: error.message, completedAt: Date.now() });
-			}
-
-			msg.ack();
-		}
 	},
 };

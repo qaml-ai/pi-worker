@@ -4,15 +4,6 @@
  * Equivalent to `npx shadcn add <component>` but operates on an
  * in-memory filesystem. Fetches component source + dependencies
  * from the shadcn registry and writes them to the files map.
- *
- * @example
- * ```ts
- * const files = new Map<string, string>();
- * const tools = [
- *   ...createMemoryTools(files),
- *   createShadcnTool(files),
- * ];
- * ```
  */
 
 import { Type, type Static } from "@sinclair/typebox";
@@ -36,11 +27,9 @@ interface RegistryItem {
 }
 
 export interface ShadcnToolOptions {
-	/** Style variant. Default: "new-york" */
 	style?: string;
-	/** Prefix for file paths in the map (e.g. "proj_123/"). */
 	prefix?: string;
-	/** Base directory for components. Default: "src/components" */
+	/** Base directory for components. Default: "app/components" */
 	componentDir?: string;
 }
 
@@ -50,24 +39,13 @@ const addSchema = Type.Object({
 	}),
 });
 
-/**
- * Create a tool that installs shadcn/ui components into the in-memory filesystem.
- *
- * The tool:
- * 1. Fetches component source from the shadcn registry
- * 2. Recursively resolves registry dependencies (other shadcn components)
- * 3. Writes component files to the filesystem
- * 4. Updates package.json with npm dependencies
- */
 export function createShadcnTool(
 	files: Map<string, string>,
 	options?: ShadcnToolOptions,
 ) {
 	const prefix = options?.prefix ?? "";
-	const componentDir = options?.componentDir ?? "src/components";
+	const componentDir = options?.componentDir ?? "app/components";
 
-	// Read style from components.json (written by scaffold) for consistency.
-	// Falls back to options.style or default.
 	function getRegistryBase(): string {
 		const componentsJson = files.get(`${prefix}components.json`);
 		if (componentsJson) {
@@ -90,12 +68,12 @@ export function createShadcnTool(
 			_id: string,
 			{ components }: Static<typeof addSchema>,
 		) => {
+			console.log(JSON.stringify({ at: new Date().toISOString(), id: prefix || "(root)", step: "shadcn_add_start", components, registryBase: getRegistryBase() }));
 			const installed: string[] = [];
 			const failed: string[] = [];
 			const addedDeps: Set<string> = new Set();
 			const visited = new Set<string>();
 
-			// Recursively install components and their registry dependencies
 			const queue = [...components];
 			while (queue.length > 0) {
 				const name = queue.shift()!;
@@ -103,29 +81,25 @@ export function createShadcnTool(
 				visited.add(name);
 
 				try {
+					console.log(JSON.stringify({ at: new Date().toISOString(), id: prefix || "(root)", step: "shadcn_component_fetch_start", name }));
 					const item = await fetchComponent(getRegistryBase(), name);
 					if (!item) {
+						console.log(JSON.stringify({ at: new Date().toISOString(), id: prefix || "(root)", step: "shadcn_component_fetch_failed", name }));
 						failed.push(name);
 						continue;
 					}
+					console.log(JSON.stringify({ at: new Date().toISOString(), id: prefix || "(root)", step: "shadcn_component_fetch_done", name, files: item.files.length, dependencies: item.dependencies?.length || 0, registryDependencies: item.registryDependencies?.length || 0 }));
 
-					// Write component files (strip registry style prefix from paths)
 					for (const file of item.files) {
 						const cleanPath = file.path.replace(/^registry\/[^/]+\//, "");
 						const filePath = `${prefix}${componentDir}/${cleanPath}`;
-						const content = file.content
-							.replace(/@\/registry\/[^/]+\/lib\//g, "@/lib/")
-							.replace(/@\/registry\/[^/]+\/ui\//g, "@/components/ui/")
-							.replace(/@\/registry\/[^/]+\/hooks\//g, "@/hooks/");
-						files.set(filePath, content);
+						files.set(filePath, sanitizeRegistryContent(file.content));
 					}
 
-					// Track npm dependencies
 					if (item.dependencies) {
 						for (const dep of item.dependencies) addedDeps.add(dep);
 					}
 
-					// Queue registry dependencies (other shadcn components)
 					if (item.registryDependencies) {
 						for (const regDep of item.registryDependencies) {
 							if (!visited.has(regDep)) queue.push(regDep);
@@ -133,24 +107,24 @@ export function createShadcnTool(
 					}
 
 					installed.push(name);
-				} catch {
+				} catch (error: any) {
+					console.log(JSON.stringify({ at: new Date().toISOString(), id: prefix || "(root)", step: "shadcn_component_exception", name, error: error?.message || String(error) }));
 					failed.push(name);
 				}
 			}
 
-			// Update package.json with new dependencies
 			if (addedDeps.size > 0) {
 				updatePackageJson(files, prefix, addedDeps);
 			}
 
-			// Also ensure the cn() utility exists
-			ensureUtils(files, prefix, componentDir);
+			ensureUtils(files, prefix);
 
 			const summary = [
 				`Installed: ${installed.join(", ") || "(none)"}`,
 				failed.length > 0 ? `Failed: ${failed.join(", ")}` : null,
 				addedDeps.size > 0 ? `Added deps: ${[...addedDeps].join(", ")}` : null,
 			].filter(Boolean).join("\n");
+			console.log(JSON.stringify({ at: new Date().toISOString(), id: prefix || "(root)", step: "shadcn_add_done", installed, failed, addedDeps: [...addedDeps] }));
 
 			return {
 				content: [{ type: "text" as const, text: summary }],
@@ -174,6 +148,28 @@ async function fetchComponent(registryBase: string, name: string): Promise<Regis
 	}
 }
 
+function sanitizeRegistryContent(content: string): string {
+	let next = content
+		.replace(/@\/registry\/[^/]+\/lib\//g, "~/lib/")
+		.replace(/@\/registry\/[^/]+\/ui\//g, "~/components/ui/")
+		.replace(/@\/registry\/[^/]+\/hooks\//g, "~/hooks/")
+		.replace(/from "@\/lib\//g, 'from "~/lib/')
+		.replace(/from "@\/components\//g, 'from "~/components/')
+		.replace(/from "@\/hooks\//g, 'from "~/hooks/');
+
+	const iconImportMatch = next.match(/<IconPlaceholder[\s\S]*?lucide="([A-Za-z0-9_]+)"[\s\S]*?\/>/);
+	if (next.includes("@/app/(create)/components/icon-placeholder") && iconImportMatch?.[1]) {
+		const iconName = iconImportMatch[1];
+		next = next.replace(
+			/import\s+\{\s*IconPlaceholder\s*\}\s+from\s+"@\/app\/\(create\)\/components\/icon-placeholder"\s*\n?/,
+			`import { ${iconName} } from "lucide-react"\n`,
+		);
+		next = next.replace(/<IconPlaceholder[\s\S]*?\/>/, `<${iconName} />`);
+	}
+
+	return next;
+}
+
 function updatePackageJson(files: Map<string, string>, prefix: string, deps: Set<string>) {
 	const pkgPath = `${prefix}package.json`;
 	let pkg: any = {};
@@ -193,8 +189,8 @@ function updatePackageJson(files: Map<string, string>, prefix: string, deps: Set
 	files.set(pkgPath, JSON.stringify(pkg, null, 2));
 }
 
-function ensureUtils(files: Map<string, string>, prefix: string, componentDir: string) {
-	const utilsPath = `${prefix}src/lib/utils.ts`;
+function ensureUtils(files: Map<string, string>, prefix: string) {
+	const utilsPath = `${prefix}app/lib/utils.ts`;
 	if (files.has(utilsPath)) return;
 
 	files.set(utilsPath, `import { type ClassValue, clsx } from "clsx";
@@ -205,6 +201,5 @@ export function cn(...inputs: ClassValue[]) {
 }
 `);
 
-	// Add clsx and tailwind-merge to package.json
 	updatePackageJson(files, prefix, new Set(["clsx", "tailwind-merge"]));
 }

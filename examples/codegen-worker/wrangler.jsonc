@@ -3,35 +3,25 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "define": {
     "__filename": "\"/typescript.js\"",
     "__dirname": "\"/\""
   },
+  "workflows": [
+    {
+      "binding": "CODEGEN_WORKFLOW",
+      "name": "codegen-workflow",
+      "class_name": "CodegenWorkflow"
+    }
+  ],
   "r2_buckets": [
     {
       "binding": "FILES",
       "bucket_name": "codegen-files"
     }
-  ],
-  "kv_namespaces": [
-    {
-      "binding": "JOBS",
-      "id": "0d24820a74ea48e7a96e1d359712cf01"
-    }
-  ],
-  "queues": {
-    "producers": [
-      {
-        "binding": "CODEGEN_QUEUE",
-        "queue": "codegen-queue"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "codegen-queue",
-        "max_batch_size": 1,
-        "max_retries": 0
-      }
-    ]
-  }
+  ]
 }

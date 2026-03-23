@@ -10,14 +10,13 @@ describe("createShadcnTool", () => {
 		const text = result.content[0].text;
 
 		expect(text).toContain("button");
-		expect(files.has("src/components/ui/button.tsx")).toBe(true);
+		expect(files.has("app/components/ui/button.tsx")).toBe(true);
 
-		const buttonContent = files.get("src/components/ui/button.tsx")!;
+		const buttonContent = files.get("app/components/ui/button.tsx")!;
 		expect(buttonContent).toContain("React");
 		expect(buttonContent).toContain("variant");
-		// Import paths should be rewritten from registry paths
 		expect(buttonContent).not.toContain("@/registry/");
-		expect(buttonContent).toContain("@/lib/utils");
+		expect(buttonContent).toContain("~/lib/utils");
 	}, 15000);
 
 	it("installs multiple components", async () => {
@@ -26,9 +25,9 @@ describe("createShadcnTool", () => {
 
 		await tool.execute("test", { components: ["button", "card", "badge"] });
 
-		expect(files.has("src/components/ui/button.tsx")).toBe(true);
-		expect(files.has("src/components/ui/card.tsx")).toBe(true);
-		expect(files.has("src/components/ui/badge.tsx")).toBe(true);
+		expect(files.has("app/components/ui/button.tsx")).toBe(true);
+		expect(files.has("app/components/ui/card.tsx")).toBe(true);
+		expect(files.has("app/components/ui/badge.tsx")).toBe(true);
 	}, 15000);
 
 	it("adds npm dependencies to package.json", async () => {
@@ -37,7 +36,6 @@ describe("createShadcnTool", () => {
 		]);
 		const tool = createShadcnTool(files);
 
-		// sonner has known npm deps (sonner, next-themes)
 		await tool.execute("test", { components: ["sonner"] });
 
 		const pkg = JSON.parse(files.get("package.json")!);
@@ -50,8 +48,8 @@ describe("createShadcnTool", () => {
 
 		await tool.execute("test", { components: ["button"] });
 
-		expect(files.has("src/lib/utils.ts")).toBe(true);
-		const utils = files.get("src/lib/utils.ts")!;
+		expect(files.has("app/lib/utils.ts")).toBe(true);
+		const utils = files.get("app/lib/utils.ts")!;
 		expect(utils).toContain("cn(");
 		expect(utils).toContain("clsx");
 		expect(utils).toContain("twMerge");
@@ -63,21 +61,19 @@ describe("createShadcnTool", () => {
 
 		await tool.execute("test", { components: ["button"] });
 
-		expect(files.has("proj_123/src/components/ui/button.tsx")).toBe(true);
-		expect(files.has("proj_123/src/lib/utils.ts")).toBe(true);
+		expect(files.has("proj_123/app/components/ui/button.tsx")).toBe(true);
+		expect(files.has("proj_123/app/lib/utils.ts")).toBe(true);
 	}, 15000);
 
 	it("reads style from components.json", async () => {
 		const files = new Map<string, string>();
-		// Simulate scaffold writing components.json with nova style
 		files.set("components.json", JSON.stringify({ style: "radix-nova" }));
 		const tool = createShadcnTool(files);
 
 		await tool.execute("test", { components: ["button"] });
 
-		const button = files.get("src/components/ui/button.tsx")!;
+		const button = files.get("app/components/ui/button.tsx")!;
 		expect(button).toBeDefined();
-		// nova style exists and returns a valid component
 		expect(button).toContain("React");
 	}, 15000);
 
@@ -88,7 +84,19 @@ describe("createShadcnTool", () => {
 
 		await tool.execute("test", { components: ["button"] });
 
-		expect(files.has("proj/src/components/ui/button.tsx")).toBe(true);
+		expect(files.has("proj/app/components/ui/button.tsx")).toBe(true);
+	}, 15000);
+
+	it("sanitizes broken icon-placeholder imports from the registry", async () => {
+		const files = new Map<string, string>();
+		const tool = createShadcnTool(files);
+
+		await tool.execute("test", { components: ["checkbox"] });
+
+		const checkbox = files.get("app/components/ui/checkbox.tsx")!;
+		expect(checkbox).not.toContain("icon-placeholder");
+		expect(checkbox).toContain('from "lucide-react"');
+		expect(checkbox).toContain("<CheckIcon />");
 	}, 15000);
 
 	it("handles missing components gracefully", async () => {

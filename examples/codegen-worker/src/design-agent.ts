@@ -96,6 +96,8 @@ export async function runDesignAgent(
 	modelId?: string,
 ): Promise<DesignResult> {
 	let chosenOptions: ScaffoldOptions = {};
+	const runId = prefix.replace(/\/$/, "");
+	console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_agent_start", promptLength: prompt.length, projectName, model: modelId || "google/gemini-3-flash-preview" }));
 
 	const scaffoldTool = {
 		name: "scaffold" as const,
@@ -103,8 +105,10 @@ export async function runDesignAgent(
 		description: "Scaffold the project with the chosen design options. Call this exactly once.",
 		parameters: scaffoldSchema,
 		execute: async (_id: string, opts: Static<typeof scaffoldSchema>) => {
+			console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_scaffold_execute_start", opts }));
 			chosenOptions = opts;
 			await scaffoldProject(files, prefix, projectName, opts);
+			console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_scaffold_execute_done", fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length }));
 
 			const summary = [
 				`Scaffolded with:`,
@@ -131,7 +135,18 @@ export async function runDesignAgent(
 		getApiKey: async () => apiKey,
 	});
 
+	agent.subscribe((e) => {
+		if (e.type === "tool_execution_start") {
+			console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_tool_start", toolName: (e as any).toolName, args: (e as any).args }));
+		} else if (e.type === "tool_execution_end") {
+			const ev = e as any;
+			const text = ev.result?.content?.[0]?.text ?? "";
+			console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_tool_end", toolName: ev.toolName, isError: ev.isError, resultPreview: text.slice(0, 200) }));
+		}
+	});
+
 	await agent.prompt(prompt);
+	console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_agent_prompt_done", error: agent.state.error || null, chosenOptions }));
 
 	if (agent.state.error) {
 		throw new Error(`Design agent failed: ${agent.state.error}`);
@@ -139,8 +154,10 @@ export async function runDesignAgent(
 
 	// If the agent didn't call scaffold (shouldn't happen), do it with defaults
 	if (files.size === 0) {
+		console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_agent_fallback_scaffold" }));
 		await scaffoldProject(files, prefix, projectName);
 	}
 
+	console.log(JSON.stringify({ at: new Date().toISOString(), id: runId, step: "design_agent_done", fileCount: [...files.keys()].filter((k) => k.startsWith(prefix)).length, chosenOptions }));
 	return { options: chosenOptions };
 }
